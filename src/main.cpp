@@ -3,7 +3,7 @@
 //     v0_1 created:  2023-11-08 -- 1209 CST
 //     v0_6 created:  2023-11-16 -- 2226 CST
 //     v0_b created:  2025-05-19 -- 0025 CST
-//     last updated:  2025-05-19 -- 0025 CST
+//     last updated:  2026-05-20 -- 0328 CDT
 //           author:  Kevin Lange
 //      description:  Main code for Johnny 4 controller/transmitter
 //                    running on a LILYGO TTGO T-Display v1.1 ESP32 board
@@ -16,6 +16,10 @@
 //                    v0_6 -- Converting to sprite display for efficiency
 //                   v0_6b -- Migrated from Arduino IDE to Platform.io
 //                          - Fix keypad matrix (it had gotten wired half backwards)
+//                  v0_6_3 -- Comment cleanup and style normalization
+//                          - Fixed typos, normalized section dividers, corrected stale
+//                            map() range comments to reflect actual code behavior
+//                          - No functional changes (yet)
 //
 //******************************************************************************
 
@@ -55,7 +59,7 @@ ADS1115 ADS_02(0x49);  // I2C address of the second ADS1115 //ADDRESS PIN TO VDD
 // (NOTE - GPIO pin 12 "works", but if it's connected to a potentiometer, it causes the ESP32 not to be able to flash/boot)
 // (NOTE - These GPIO pins do NOT seem to work:  17)
 
-// PINS CURRENTLY IN USE:    32, 33, 36, 37, 386
+// PINS CURRENTLY IN USE:    32, 33, 36, 37, 38
 // PINS PREVIOUSLY IN USE:    15, 21, 22, 25, 26, 27, 32, 33, 36
 // For UART, try 17 as TX and 37 as RX (May need to alter Arduino IDE config something or other)(I've read that 36, 37. & 38 may only be used as inputs.) -KL 2023-11-04-0433a
 // PINS "32-39" (which on this board are 32, 33, 36, 37, 38) use ADC1. ADC2 will be tied up by WiFi in future iterations.
@@ -71,7 +75,7 @@ int neck_value = 0;
 int jaw_value = 0;
 
 
-//    -----ESP-NOW RELATED
+// --- ESP-NOW RELATED ---
 // MAC Address of receiver - edit as required [OG: 0xB0, 0xB2, 0x1C, 0x4F, 0x16, 0xC4]
 uint8_t broadcastAddress[] = { 0xA0, 0xDD, 0x6C, 0x74, 0xDA, 0x74 }; //MAY 2026 TTGO 2026-05-01--1238-KL
 
@@ -105,7 +109,7 @@ struct_message_xmit xmitData;
 esp_now_peer_info_t peerInfo;
 
 
-//-----END ESP-NOW RELATED
+// --- END ESP-NOW RELATED ---
 
 // timer for refreshing tft display 25 times per second
 unsigned long tft_update_previousMillis = 0;   // Store the last time the timer was updated
@@ -187,7 +191,7 @@ void setup() {
   // Disable WiFi Sleep mode
   WiFi.setSleep(false);
 
-  // Initilize ESP-NOW
+  // Initialize ESP-NOW
   if (esp_now_init() != ESP_OK) {
     connectStatus = "init error";
     connectError = HIGH;
@@ -280,8 +284,6 @@ void loop() {
   jaw_value = ADS_02.readADC(3);
 
 
-
-
   //*********************************************
   // --- VOLUME ---
   // Read the value of the potentiometer
@@ -300,7 +302,7 @@ void loop() {
     volume_value = 17000;
   }
 
-  volume_value = map(volume_value, 0, 17000, 0, 100);  //Remaps the values from 0-32767 to 0-100
+  volume_value = map(volume_value, 0, 17000, 0, 100);  // Remaps 0-17000 to 0-100
                                                        /*
   screen_bottom_sprite_203.drawString("VOL: ", 0, 40, 2);
   screen_bottom_sprite_203.fillRect(70, 40, 24, 20, TFT_BLACK);
@@ -308,7 +310,7 @@ void loop() {
   screen_bottom_sprite_203.drawString(String(volume_value), 70, 40, 2);
 */
 
-  // ---END VOLUME ---
+  // --- END VOLUME ---
   //*********************************************
 
 
@@ -322,7 +324,7 @@ void loop() {
     eyes_value = 17000;
   }
 
-  eyes_value = map(eyes_value, 0, 17000, 0, 255);  //Remaps the values from 0-32767 to 0-100
+  eyes_value = map(eyes_value, 0, 17000, 0, 255);  // Remaps 0-17000 to 0-255
 
   /*
   screen_bottom_sprite_203.setTextColor(TFT_GREEN);
@@ -330,7 +332,7 @@ void loop() {
   screen_bottom_sprite_203.fillRect(70, 60, 24, 20, TFT_BLACK);
   screen_bottom_sprite_203.drawString(String(eyes_value), 70, 60, 2);
   */
-  // ---END EYES ---
+  // --- END EYES ---
   //*********************************************
 
 
@@ -345,14 +347,14 @@ void loop() {
     spot_value = 17000;
   }
 
-  spot_value = map(spot_value, 0, 17000, 0, 255);  //Remaps the values from 0-32767 to 0-100
+  spot_value = map(spot_value, 0, 17000, 0, 255);  // Remaps 0-17000 to 0-255
   /*
   screen_bottom_sprite_203.setTextColor(TFT_GREEN);
   screen_bottom_sprite_203.drawString("SPOT: ", 0, 80, 2);
   screen_bottom_sprite_203.fillRect(70, 80, 24, 20, TFT_BLACK);
   screen_bottom_sprite_203.drawString(String(spot_value), 70, 80, 2);
   */
-  // ---END SPOT ---
+  // --- END SPOT ---
   //*********************************************
 
 
@@ -367,14 +369,14 @@ void loop() {
     left_arm_value = 17000;
   }
 
-  left_arm_value = map(left_arm_value, 0, 17000, 0, 255);  //Remaps the values from 0-32767 to 0-100
+  left_arm_value = map(left_arm_value, 0, 17000, 0, 255);  // Remaps 0-17000 to 0-255
                                                            /*
   screen_bottom_sprite_203.setTextColor(TFT_GREEN);
   screen_bottom_sprite_203.drawString("L-ARM: ", 0, 100, 2);
   screen_bottom_sprite_203.fillRect(70, 100, 24, 20, TFT_BLACK);
   screen_bottom_sprite_203.drawString(String(left_arm_value), 70, 100, 2);
   */
-  // ---END LEFT_ARM ---
+  // --- END LEFT_ARM ---
   //*********************************************
 
 
@@ -389,7 +391,7 @@ void loop() {
     right_arm_value = 17000;
   }
 
-  right_arm_value = map(right_arm_value, 0, 17000, 0, 255);  //Remaps the values from 0-32767 to 0-100
+  right_arm_value = map(right_arm_value, 0, 17000, 0, 255);  // Remaps 0-17000 to 0-255
 
   /*
   screen_bottom_sprite_203.setTextColor(TFT_GREEN);
@@ -397,7 +399,7 @@ void loop() {
   screen_bottom_sprite_203.fillRect(70, 120, 24, 20, TFT_BLACK);
   screen_bottom_sprite_203.drawString(String(right_arm_value), 70, 120, 2);
   */
-  // ---END RIGHT_ARM ---
+  // --- END RIGHT_ARM ---
   //*********************************************
 
 
@@ -412,7 +414,7 @@ void loop() {
     neck_value = 17000;
   }
 
-  neck_value = map(neck_value, 0, 17000, 0, 255);  //Remaps the values from 0-32767 to 0-100
+  neck_value = map(neck_value, 0, 17000, 0, 255);  // Remaps 0-17000 to 0-255
 
   /*
   screen_bottom_sprite_203.setTextColor(TFT_GREEN);
@@ -420,7 +422,7 @@ void loop() {
   screen_bottom_sprite_203.fillRect(70, 140, 24, 20, TFT_BLACK);
   screen_bottom_sprite_203.drawString(String(neck_value), 70, 140, 2);
   */
-  // ---END NECK ---
+  // --- END NECK ---
   //*********************************************
 
 
@@ -435,7 +437,7 @@ void loop() {
     jaw_value = 17000;
   }
 
-  jaw_value = map(jaw_value, 0, 17000, 0, 255);  //Remaps the values from 0-32767 to 0-100
+  jaw_value = map(jaw_value, 0, 17000, 0, 255);  // Remaps 0-17000 to 0-255
 
   /*
   screen_bottom_sprite_203.setTextColor(TFT_GREEN);
@@ -443,12 +445,11 @@ void loop() {
   screen_bottom_sprite_203.fillRect(70, 160, 24, 20, TFT_BLACK);
   screen_bottom_sprite_203.drawString(String(jaw_value), 70, 160, 2);
   */
-  // ---END JAW ---
+  // --- END JAW ---
   //*********************************************
 
 
-
-  // ------- ESP-NOW RELATED
+  // --- ESP-NOW RELATED ---
   //***********************************************************
   // --- READY ALL TRANSMIT DATA WITH ALL POTENTIOMETER VALUES TO SEND TO RECEIVER ---
   xmitData.volume_xmit = volume_value;
@@ -460,12 +461,11 @@ void loop() {
   xmitData.jaw_xmit = jaw_value;
   // --- END READY ALL TRANSMIT DATA WITH ALL POTENTIOMETER VALUES TO SEND TO RECEIVER ---
   //***********************************************************
-  //------- ESP-NOW RELATED
-  //
+  // --- END ESP-NOW RELATED ---
 
   //unsigned long currentMillis = millis(); // Get the current time
 
-  // --- BATTERY-RELATED ---
+  // --- BATTERY RELATED ---
 
   // Check if it's time to perform an action
   if (currentMillis - battery_01_previousMillis >= battery_01_interval) {
@@ -523,13 +523,6 @@ void loop() {
   // --- END BATTERY RELATED ---
 
 
-
-
-
-
-
-
-
   // Check if it's time to perform an action
   if (currentMillis - keypad_previousMillis >= keypad_interval) {
     // It's time to perform your action
@@ -562,12 +555,12 @@ void loop() {
 
         // "#" Resets "hitting same key twice lock" so you may play the same single-digit (0-9) sound clip twice in a row if desired.
         if (key == 14) {
-          old_key = -1;               // Resets old_key to guarentee key will not equal old_key
+          old_key = -1;               // Resets old_key to guarantee key will not equal old_key
           phrase_select_buffer = "";  // Clears phrase_select_buffer
           screen_bottom_sprite_203.fillRect(70, 0, 65, 20, TFT_BLACK);
           screen_bottom_sprite_203.fillRect(70, 20, 65, 20, TFT_BLACK);
         } else if (key == 12) {
-          old_key = -1;  // Resets old_key to guarentee key will not equal old_key
+          old_key = -1;  // Resets old_key to guarantee key will not equal old_key
           phrase_select_buffer = "STOP";
           //************SEND "STOP" TO RECEIVER****************
           xmitData.phrase_select_xmit = phrase_select_buffer;  // ESP-NOW
@@ -651,7 +644,7 @@ void loop() {
 }
 
 
-// ------- ESP-NOW RELATED
+// --- ESP-NOW RELATED ---
 // Callback function called when data is sent
 void OnDataSent(const uint8_t *mac_addr, esp_now_send_status_t status) {
 
@@ -667,13 +660,12 @@ void OnDataSent(const uint8_t *mac_addr, esp_now_send_status_t status) {
 // Callback function executed when data is received
 void OnDataRecv(const uint8_t *mac, const uint8_t *incomingData, int len) {
 
-  // Get receievd data
+  // Get received data
   memcpy(&rcvData, incomingData, sizeof(rcvData));
 
   // Pass received values to local variables
 }
-//
-// -------- END ESP-NOW RELATED
+// --- END ESP-NOW RELATED ---
 
 
 void labelsDisplaySprite() {
