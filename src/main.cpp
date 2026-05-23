@@ -3,7 +3,7 @@
 //     v0_1 created:  2023-11-08 -- 1209 CST
 //     v0_6 created:  2023-11-16 -- 2226 CST
 //   v0_6_4 created:  2026-05-20 -- 0700 CDT
-//     last updated:  2026-05-20 -- 0700 CDT
+//     last updated:  2026-05-22 -- CDT
 //           author:  Kevin Lange
 //      description:  Main code for Johnny 4 controller/transmitter
 //                    running on a LILYGO TTGO T-Display v1.1 ESP32 board
@@ -15,6 +15,7 @@
 //                  v0_6_3 -- Comment cleanup and style normalization
 //                  v0_6_4 -- Condensed; removed dead code; pot processing
 //                            extracted into processPot() helper
+//                  v0_6_5 -- Added UART link to XIAO ESP32S3 display board
 //
 //
 //
@@ -22,26 +23,36 @@
 //      ------------------------------------------------------------------
 //      LilyGO TTGO T-Display v1.1 (ESP32) Module's Pin Connections
 //      ------------------------------------------------------------------
-//      VIN:    
+//      VIN:
 //      GND:  Make sure all grounds are connected together
-//     3.3V:  
+//     3.3V:
 //        0:  button 1 / BOOT      [USED BY TTGO]
 //        4:  TFT backlight        [USED BY TTGO]
 //        5:  TFT CS               [USED BY TTGO]
 //       16:  TFT DC               [USED BY TTGO]
+//       17:  XIAO LINK TX  →  XIAO D7 / GPIO44   (output only; unreliable as input per README)
 //       18:  TFT SCLK             [USED BY TTGO]
 //       19:  TFT MOSI             [USED BY TTGO]
 //
-//       21:  SDA  [I2C BUS] (ADS_01 0x48, ADS_02 0x49, keypad 0x20)  
+//       21:  SDA  [I2C BUS] (ADS_01 0x48, ADS_02 0x49, keypad 0x20)
 //       22:  SCL  [I2C BUS]
 //
 //       23:  TFT RST              [USED BY TTGO]
 //
+//       27:  XIAO LINK RX  ←  XIAO D6 / GPIO43
+//
 //       34:  battery voltage sense
 //
 //       35:  button 2             [USED BY TTGO]
-//       ------------------------------------------------------------------
-//       ------------------------------------------------------------------
+//      ------------------------------------------------------------------
+//      ------------------------------------------------------------------
+//
+//      XIAO LINK WIRING  (3.3V logic on both sides — no level shifter needed)
+//      ------------------------------------------------------------------
+//      TTGO GPIO17  →  XIAO D7 (GPIO44)    TTGO TX → XIAO RX
+//      TTGO GPIO27  ←  XIAO D6 (GPIO43)    TTGO RX ← XIAO TX
+//      TTGO GND     —  XIAO GND
+//      ------------------------------------------------------------------
 //
 //
 //
@@ -65,11 +76,38 @@ void OnDataSent(const uint8_t* mac_addr, esp_now_send_status_t status);
 void labelsDisplaySprite();
 void dataDisplaySprite();
 void tftDisplayUpdate();
+void sendToXIAO();
 // ------------------------------------------
 
 
 #define SDA 21
 #define SCL 22
+
+// --- XIAO LINK ---
+#define XIAO_TX_PIN  17   // GPIO17 output → XIAO D7 (GPIO44)
+#define XIAO_RX_PIN  27   // GPIO27 input  ← XIAO D6 (GPIO43)
+#define XIAO_BAUD    115200
+
+// Binary packet sent to the XIAO display board over Serial1.
+// Both ends must keep this struct identical.
+typedef struct __attribute__((packed)) {
+  uint8_t  magic[2];       // 0xAB, 0xCD — frame sync marker
+  uint8_t  volume;         // 0–100
+  uint8_t  eyes;           // 0–255
+  uint8_t  spot;           // 0–255
+  uint8_t  left_arm;       // 0–255
+  uint8_t  right_arm;      // 0–255
+  uint8_t  neck;           // 0–255
+  uint8_t  jaw;            // 0–255
+  uint16_t bat1_mv;        // controller battery in millivolts
+  int16_t  bat2_raw;       // robot battery 2 — raw value from receiver
+  int16_t  bat3_raw;       // robot battery 3 — raw value from receiver
+  uint8_t  connect_ok;     // 1 = ESP-NOW link healthy, 0 = error
+  char     phrase[32];     // null-terminated phrase name (e.g. "A12")
+  uint8_t  checksum;       // XOR of all preceding bytes in the packet
+} disp_pkt_t;
+// --- END XIAO LINK ---
+
 
 ADS1115 ADS_01(0x48);  // ADDRESS PIN TO GND
 ADS1115 ADS_02(0x49);  // ADDRESS PIN TO VDD
@@ -114,6 +152,9 @@ int right_arm_value = 0;
 int neck_value      = 0;
 int jaw_value       = 0;
 
+// Controller battery (millivolts), updated by battery timer, read by sendToXIAO()
+uint16_t bat1_mv = 0;
+
 
 // Timers
 unsigned long tft_update_previousMillis = 0;
@@ -149,6 +190,9 @@ void setup() {
   pcf8574.begin();
   keyPad.begin();
   Serial.begin(115200);
+
+  // XIAO display link
+  Serial1.begin(XIAO_BAUD, SERIAL_8N1, XIAO_RX_PIN, XIAO_TX_PIN);
 
   ADS_01.begin();
   delay(10);
@@ -211,6 +255,7 @@ void loop() {
   if (currentMillis - tft_update_previousMillis >= tft_update_interval) {
     tft_update_previousMillis = currentMillis;
     tftDisplayUpdate();
+    sendToXIAO();
   }
 
   // --- ADC READS ---
@@ -236,6 +281,8 @@ void loop() {
     battery_01_previousMillis = currentMillis;
 
     float product = 0.0018276 * analogRead(34);  // IO34 is battery voltage
+    bat1_mv = (uint16_t)(product * 1000.0f);
+
     char str[10];
     dtostrf(product, 4, 2, str);
 
@@ -329,6 +376,36 @@ void OnDataRecv(const uint8_t *mac, const uint8_t *incomingData, int len) {
   memcpy(&rcvData, incomingData, sizeof(rcvData));
 }
 // --- END ESP-NOW RELATED ---
+
+
+// --- XIAO LINK ---
+void sendToXIAO() {
+  disp_pkt_t pkt;
+  pkt.magic[0]   = 0xAB;
+  pkt.magic[1]   = 0xCD;
+  pkt.volume     = (uint8_t)volume_value;
+  pkt.eyes       = (uint8_t)eyes_value;
+  pkt.spot       = (uint8_t)spot_value;
+  pkt.left_arm   = (uint8_t)left_arm_value;
+  pkt.right_arm  = (uint8_t)right_arm_value;
+  pkt.neck       = (uint8_t)neck_value;
+  pkt.jaw        = (uint8_t)jaw_value;
+  pkt.bat1_mv    = bat1_mv;
+  pkt.bat2_raw   = (int16_t)rcvData.battery_02_voltage_rcv;
+  pkt.bat3_raw   = (int16_t)rcvData.battery_03_voltage_rcv;
+  pkt.connect_ok = connectError ? 0 : 1;
+  strncpy(pkt.phrase, rcvData.phrase_playing_rcv.c_str(), sizeof(pkt.phrase) - 1);
+  pkt.phrase[sizeof(pkt.phrase) - 1] = '\0';
+
+  // XOR checksum over all bytes except the final checksum byte
+  uint8_t cs = 0;
+  const uint8_t *p = (const uint8_t *)&pkt;
+  for (size_t i = 0; i < sizeof(pkt) - 1; i++) cs ^= p[i];
+  pkt.checksum = cs;
+
+  Serial1.write((const uint8_t *)&pkt, sizeof(pkt));
+}
+// --- END XIAO LINK ---
 
 
 void labelsDisplaySprite() {
