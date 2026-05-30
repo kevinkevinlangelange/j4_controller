@@ -170,12 +170,43 @@ I2CKeyPad keyPad(0x20);
 TFT_eSPI tft = TFT_eSPI();
 TFT_eSprite screen_bottom_sprite_203 = TFT_eSprite(&tft);
 
-char keymap[19] = "123A456B789C*0#DNF";  // N = NoKey, F = Fail
+// Keypad wiring: keypad pin 1 plugs into P0 straight through.
+// Actual pin→signal: P0=Row3, P1=Row2, P2=Row1, P3=Col4, P4=Col3, P5=Col2, P6=Col1, P7=Row4
+// (P3 and P7 are swapped vs the I2CKeyPad library's expectation, so we scan manually.)
+// Keymap indexed by (drive_index*4 + read_index), drive order: P0,P1,P2,P7; read order: P3,P4,P5,P6
+char keymap[19] = "#9630852*741DCBANF";  // N = NoKey, F = Fail
 int key      = -2;
 int old_key  = -1;
 String phrase_select_buffer = "";
 bool ready_message = true;
 
+
+// Drive row pins LOW one at a time, check if any col pin reads LOW.
+// Drive order: P0,P1,P2,P7 (= Row3,Row2,Row1,Row4)
+// Read  order: P3,P4,P5,P6 (= Col4,Col3,Col2,Col1)
+static const uint8_t KP_DRIVE_WRITE[4] = { 0xFE, 0xFD, 0xFB, 0x7F }; // ~(1<<P) for P=0,1,2,7
+static const uint8_t KP_READ_MASK      = 0x78;  // bits 3,4,5,6 = P3,P4,P5,P6
+
+bool kpIsPressed() {
+  pcf8574.write8(0x78);  // all row pins LOW, all col pins HIGH-Z
+  return (pcf8574.read8() & KP_READ_MASK) != KP_READ_MASK;
+}
+
+uint8_t kpGetKey() {
+  static const uint8_t READ_BIT[4] = { 3, 4, 5, 6 };  // P3,P4,P5,P6
+  for (uint8_t d = 0; d < 4; d++) {
+    pcf8574.write8(KP_DRIVE_WRITE[d]);
+    uint8_t val = pcf8574.read8();
+    for (uint8_t r = 0; r < 4; r++) {
+      if (!(val & (1 << READ_BIT[r]))) {
+        pcf8574.write8(0xFF);
+        return d * 4 + r;
+      }
+    }
+  }
+  pcf8574.write8(0xFF);
+  return 16;  // NoKey
+}
 
 // raw <= 100: noise floor; raw >= 65000: ADC overflow; 17000: pot physical max
 int processPot(int raw, int out_max) {
@@ -188,11 +219,7 @@ int processPot(int raw, int out_max) {
 void setup() {
   Wire.begin(SDA, SCL);
   pcf8574.begin();
-  keyPad.begin();
   Serial.begin(115200);
-
-  // XIAO display link
-  Serial1.begin(XIAO_BAUD, SERIAL_8N1, XIAO_RX_PIN, XIAO_TX_PIN);
 
   ADS_01.begin();
   delay(10);
@@ -207,6 +234,9 @@ void setup() {
   ADS_02.setDataRate(7);
   ADS_02.setMode(1);
   ADS_02.requestADC(0);
+
+  // XIAO display link — init after ADS1115 to avoid I2C/UART peripheral conflict
+  Serial1.begin(XIAO_BAUD, SERIAL_8N1, XIAO_RX_PIN, XIAO_TX_PIN);
 
   WiFi.mode(WIFI_STA);
   Serial.println("MAC Address: ");
@@ -303,8 +333,11 @@ void loop() {
   if (currentMillis - keypad_previousMillis >= keypad_interval) {
     keypad_previousMillis = currentMillis;
 
-    if (keyPad.isPressed()) {
-      key = keyPad.getLastKey();
+    if (kpIsPressed()) {
+      uint8_t rawKey = kpGetKey();
+
+      if (rawKey <= 15) {  // 16 = NoKey — only promote to global on valid read
+      key = (int)rawKey;
 
       if (ready_message) {
         screen_bottom_sprite_203.fillRect(0, 0, 135, 20, TFT_BLACK);
@@ -314,12 +347,15 @@ void loop() {
       }
 
       if (key != old_key) {
-        if (key == 14) {  // "#" — reset same-key lock and clear buffer
+        char kc = keymap[key];
+
+        if (kc == '#') {  // reset same-key lock and clear buffer
           old_key = -1;
           phrase_select_buffer = "";
           screen_bottom_sprite_203.fillRect(70,  0, 65, 20, TFT_BLACK);
           screen_bottom_sprite_203.fillRect(70, 20, 65, 20, TFT_BLACK);
-        } else if (key == 12) {  // "*" — stop playback
+
+        } else if (kc == '*') {  // stop playback
           old_key = -1;
           phrase_select_buffer = "STOP";
           xmitData.phrase_select_xmit = phrase_select_buffer;
@@ -329,20 +365,18 @@ void loop() {
           screen_bottom_sprite_203.fillRect(70, 20, 65, 20, TFT_BLACK);
           screen_bottom_sprite_203.drawString(phrase_select_buffer, 70, 20, 2);
           phrase_select_buffer = "";
+
         } else {
           old_key = key;
 
-          // Letter prefix (A/B/C/D) — wait for digit
-          if (key == 3 || key == 7 || key == 11 || key == 15) {
-            switch (key) {
-              case  3: phrase_select_buffer = "A"; break;
-              case  7: phrase_select_buffer = "B"; break;
-              case 11: phrase_select_buffer = "C"; break;
-              case 15: phrase_select_buffer = "D"; break;
-            }
+          if (kc >= 'A' && kc <= 'D') {  // Letter prefix — wait for digit
+            phrase_select_buffer = String(kc);
+            screen_bottom_sprite_203.setTextColor(TFT_GREEN);
+            screen_bottom_sprite_203.fillRect(70, 20, 65, 20, TFT_BLACK);
+            screen_bottom_sprite_203.drawString(String(kc) + "_", 70, 20, 2);
           } else {
             if (phrase_select_buffer.length() == 0) phrase_select_buffer = "0";
-            phrase_select_buffer += String(keymap[key]);
+            phrase_select_buffer += String(kc);
 
             screen_bottom_sprite_203.setTextColor(TFT_GREEN);
             screen_bottom_sprite_203.fillRect(70, 20, 65, 20, TFT_BLACK);
@@ -353,6 +387,7 @@ void loop() {
           }
         }
       }
+      }  // end key <= 15 guard
     }
   }
 
@@ -426,7 +461,7 @@ void dataDisplaySprite() {
   screen_bottom_sprite_203.setTextColor(TFT_GREEN);
   screen_bottom_sprite_203.fillRect(70, 40, 65, 140, TFT_BLACK);
 
-  if (key != 14 && !ready_message) {
+  if (!ready_message) {
     screen_bottom_sprite_203.drawString("Keypress: ",        0,  0, 2);
     screen_bottom_sprite_203.drawString(String(keymap[key]), 70, 0, 2);
   }
