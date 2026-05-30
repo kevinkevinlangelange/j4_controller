@@ -61,7 +61,6 @@
 
 #include <Wire.h>
 #include <PCF8574.h>
-#include <I2CKeyPad.h>
 #include <TFT_eSPI.h>
 #include <ADS1X15.h>
 #include <SPI.h>
@@ -166,7 +165,6 @@ const unsigned long keypad_interval     = 150;
 
 
 PCF8574 pcf8574(0x20);
-I2CKeyPad keyPad(0x20);
 TFT_eSPI tft = TFT_eSPI();
 TFT_eSprite screen_bottom_sprite_203 = TFT_eSprite(&tft);
 
@@ -275,7 +273,6 @@ void setup() {
   labelsDisplaySprite();
   screen_bottom_sprite_203.drawString("Ready...", 0, 0, 1);
 
-  keyPad.loadKeyMap(keymap);
 }
 
 

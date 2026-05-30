@@ -63,7 +63,6 @@ Managed via PlatformIO (`platformio.ini`):
 | Library | Version |
 |---------|---------|
 | RobTillaart/PCF8574 | 0.3.9 |
-| RobTillaart/I2CKeyPad | 0.3.3 |
 | RobTillaart/ADS1X15 | 0.3.13 |
 | TFT_eSPI | bundled in `lib/` (pre-configured for TTGO T-Display v1.1) |
 
