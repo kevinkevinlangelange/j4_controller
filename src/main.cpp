@@ -47,11 +47,11 @@
 //      ------------------------------------------------------------------
 //      ------------------------------------------------------------------
 //
-//      XIAO LINK WIRING  (3.3V logic on both sides — no level shifter needed)
+//      XIAO LINK WIRING  (3.3V logic on both sides - no level shifter needed)
 //      ------------------------------------------------------------------
 //      TTGO GPIO17  →  XIAO D7 (GPIO44)    TTGO TX → XIAO RX
 //      TTGO GPIO27  ←  XIAO D6 (GPIO43)    TTGO RX ← XIAO TX
-//      TTGO GND     —  XIAO GND
+//      TTGO GND     -  XIAO GND
 //      ------------------------------------------------------------------
 //
 //
@@ -90,17 +90,17 @@ void sendToXIAO();
 // Binary packet sent to the XIAO display board over Serial1.
 // Both ends must keep this struct identical.
 typedef struct __attribute__((packed)) {
-  uint8_t  magic[2];       // 0xAB, 0xCD — frame sync marker
-  uint8_t  volume;         // 0–100
-  uint8_t  eyes;           // 0–255
-  uint8_t  spot;           // 0–255
-  uint8_t  left_arm;       // 0–255
-  uint8_t  right_arm;      // 0–255
-  uint8_t  neck;           // 0–255
-  uint8_t  jaw;            // 0–255
+  uint8_t  magic[2];       // 0xAB, 0xCD - frame sync marker
+  uint8_t  volume;         // 0-100
+  uint8_t  eyes;           // 0-255
+  uint8_t  spot;           // 0-255
+  uint8_t  left_arm;       // 0-255
+  uint8_t  right_arm;      // 0-255
+  uint8_t  neck;           // 0-255
+  uint8_t  jaw;            // 0-255
   uint16_t bat1_mv;        // controller battery in millivolts
-  int16_t  bat2_raw;       // robot battery 2 — raw value from receiver
-  int16_t  bat3_raw;       // robot battery 3 — raw value from receiver
+  int16_t  bat2_raw;       // robot battery 2 - raw value from receiver
+  int16_t  bat3_raw;       // robot battery 3 - raw value from receiver
   uint8_t  connect_ok;     // 1 = ESP-NOW link healthy, 0 = error
   char     phrase[32];     // null-terminated phrase name (e.g. "A12")
   uint8_t  checksum;       // XOR of all preceding bytes in the packet
@@ -233,7 +233,7 @@ void setup() {
   ADS_02.setMode(1);
   ADS_02.requestADC(0);
 
-  // XIAO display link — init after ADS1115 to avoid I2C/UART peripheral conflict
+  // XIAO display link - init after ADS1115 to avoid I2C/UART peripheral conflict
   Serial1.begin(XIAO_BAUD, SERIAL_8N1, XIAO_RX_PIN, XIAO_TX_PIN);
 
   WiFi.mode(WIFI_STA);
@@ -333,7 +333,7 @@ void loop() {
     if (kpIsPressed()) {
       uint8_t rawKey = kpGetKey();
 
-      if (rawKey <= 15) {  // 16 = NoKey — only promote to global on valid read
+      if (rawKey <= 15) {  // 16 = NoKey - only promote to global on valid read
       key = (int)rawKey;
 
       if (ready_message) {
@@ -366,7 +366,7 @@ void loop() {
         } else {
           old_key = key;
 
-          if (kc >= 'A' && kc <= 'D') {  // Letter prefix — wait for digit
+          if (kc >= 'A' && kc <= 'D') {  // Letter prefix - wait for digit
             phrase_select_buffer = String(kc);
             screen_bottom_sprite_203.setTextColor(TFT_GREEN);
             screen_bottom_sprite_203.fillRect(70, 20, 65, 20, TFT_BLACK);
