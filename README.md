@@ -1,33 +1,60 @@
-# j4_controller_v0_6_4
+# j4_controller
+
+Firmware for the **Johnny 4 robot controller/transmitter**. Runs on a LILYGO TTGO T-Display v1.1 (ESP32). Reads potentiometers and a 4x4 keypad, transmits control data to the robot receiver over ESP-NOW, and mirrors live data to a secondary display board over UART.
 
 ## What is Johnny 4?
 
-Johnny 4 is a prop robot controlled wirelessly via ESP-NOW. This repository contains the firmware for the **controller/transmitter** — the handheld unit that reads potentiometers and a keypad, then sends control data to the robot's receiver board over ESP-NOW.
+Johnny 4 is a prop robot controlled wirelessly. This board is the handheld controller that the operator uses to drive the robot's servos, select audio phrases, and monitor battery status.
 
-## What this controller does
+## What this firmware does
 
-- Reads 7 analog potentiometers via two ADS1115 ADC modules (volume, eyes, spot, left arm, right arm, neck, jaw)
-- Reads a 4×4 keypad matrix via PCF8574 I2C expander to select audio phrases (jukebox-style: letter + digit, e.g. `A4`)
-- Transmits all control data to the receiver continuously via ESP-NOW
-- Displays live pot values, keypress info, and battery voltage on the built-in TFT display
-- Monitors controller battery voltage from GPIO 34 and displays it in real time
+- Reads 7 analog potentiometers via two ADS1115 ADC modules (volume, eyes, spotlight, left arm, right arm, neck, jaw)
+- Reads a 4x4 matrix keypad via PCF8574 I2C expander using a custom scan routine
+- Supports jukebox-style audio phrase selection: press a letter (A-D) then a digit (0-9) to queue a phrase, or press a digit alone to queue a 0x phrase (e.g. pressing 8 queues "08.wav")
+- Press `*` to send a STOP command, press `#` to clear the buffer
+- Transmits all control data to the robot receiver via ESP-NOW
+- Displays live pot values, keypress state, and battery voltage on the built-in TFT
+- Sends a 49-byte binary status packet to the XIAO ESP32S3 display board at 25 fps over UART
 
 ## Hardware
 
 | Component | Details |
 |-----------|---------|
-| Microcontroller | LILYGO TTGO T-Display v1.1 (ESP32 with built-in 1.14" TFT) |
+| Microcontroller | LILYGO TTGO T-Display v1.1 (ESP32 with built-in 1.14" ST7789 TFT) |
 | ADC modules | Two ADS1115 (I2C addresses 0x48 and 0x49) |
 | Keypad expander | PCF8574 I2C I/O expander (address 0x20) |
-| Keypad | 4×4 matrix keypad |
-| Display | Built-in ST7789 TFT (135×240), driven by TFT_eSPI with sprite rendering |
+| Keypad | 4x4 matrix keypad, headers soldered directly into P0-P7 |
 
-**Pin assignments:**
-- I2C bus: SDA = GPIO 21, SCL = GPIO 22
-- Battery voltage sense: GPIO 34 (ADC input, read-only)
-- ADC inputs all routed through the ADS1115 modules (on ADC1-capable pins: 32, 33, 36, 37, 38)
+## Pin assignments
 
-> Note: GPIO 12 causes boot/flash issues when connected to a potentiometer. GPIO 17 does not work reliably as an input. Pins 36, 37, and 38 are input-only.
+| GPIO | Function |
+|------|----------|
+| 21 | I2C SDA (ADS1115 x2, PCF8574 keypad) |
+| 22 | I2C SCL |
+| 17 | UART TX to XIAO display board |
+| 27 | UART RX from XIAO display board |
+| 34 | Battery voltage sense (ADC input, read-only) |
+
+Potentiometer inputs are routed through the ADS1115 modules. GPIO 12 causes boot/flash issues when connected to a pot and is avoided. GPIO 17 is unreliable as an input and is used only as TX. Pins 36, 37, and 38 are input-only.
+
+## Keypad wiring
+
+The keypad is plugged straight into PCF8574 P0-P7 (keypad pin 1 into P0, in order). The I2CKeyPad library's fixed scan pattern does not match this wiring, so the firmware uses a custom scan via the PCF8574 library directly.
+
+Actual pin-to-wire mapping:
+
+| PCF pin | Keypad wire |
+|---------|-------------|
+| P0 | Column 3 (3, 6, 9, #) |
+| P1 | Column 2 (2, 5, 8, 0) |
+| P2 | Column 1 (1, 4, 7, *) |
+| P3 | Row 4 (*, 0, #, D) |
+| P4 | Row 3 (7, 8, 9, C) |
+| P5 | Row 2 (4, 5, 6, B) |
+| P6 | Row 1 (1, 2, 3, A) |
+| P7 | Column 4 (A, B, C, D) |
+
+The scanner drives P0, P1, P2, P7 one at a time LOW and reads P3, P4, P5, P6.
 
 ## Dependencies
 
@@ -40,11 +67,9 @@ Managed via PlatformIO (`platformio.ini`):
 | RobTillaart/ADS1X15 | 0.3.13 |
 | TFT_eSPI | bundled in `lib/` (pre-configured for TTGO T-Display v1.1) |
 
-Built-in ESP-IDF components used: `esp_now`, `WiFi`
+Built-in ESP-IDF components used: `esp_now`, `WiFi`.
 
 ## Building and uploading
-
-This project uses PlatformIO. From the project root:
 
 ```bash
 # Build
@@ -57,10 +82,14 @@ pio run --target upload
 pio device monitor
 ```
 
-Upload speed is 921600 baud; serial monitor is 115200 baud (both set in `platformio.ini`).
+Upload speed is 921600 baud. Serial monitor is 115200 baud. Both are set in `platformio.ini`.
 
-The TFT_eSPI library requires a `User_Setup.h` — the local copy in `lib/TFT_eSPI/` is already configured for the TTGO T-Display v1.1. Do not replace it with a registry version without reconfiguring.
+The TFT_eSPI copy in `lib/TFT_eSPI/` is pre-configured for the TTGO T-Display v1.1. Do not replace it with the registry version without reconfiguring.
 
 ## Receiver
 
-The receiver's MAC address is set in `broadcastAddress[]` near the top of `main.cpp`. Update this if the receiver board is swapped.
+The robot receiver's MAC address is set in `broadcastAddress[]` near the top of `main.cpp`. Update this if the receiver board is swapped.
+
+## Related projects
+
+- **[j4_display](https://github.com/kevinkevinlangelange/j4_display)** -- the XIAO ESP32S3 secondary display board that receives data from this controller
