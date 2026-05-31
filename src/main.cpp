@@ -3,7 +3,7 @@
 //     v0_1 created:  2023-11-08 -- 1209 CST
 //     v0_6 created:  2023-11-16 -- 2226 CST
 //   v0_6_4 created:  2026-05-20 -- 0700 CDT
-//     last updated:  2026-05-31 -- 1127 CDT
+//     last updated:  2026-05-31 -- 1203 CDT
 //           author:  Kevin Lange
 //      description:  Main code for Johnny 4 controller/transmitter
 //                    running on a LILYGO TTGO T-Display v1.1 ESP32 board
@@ -130,8 +130,8 @@ typedef struct struct_message_xmit {
   int spot_xmit;
   int left_arm_xmit;
   int right_arm_xmit;
-  int neck_xmit;
-  int jaw_xmit;
+  int neck_left_xmit;
+  int neck_right_xmit;
 } struct_message_xmit;
 
 struct_message_xmit xmitData;
@@ -148,8 +148,10 @@ int eyes_value      = 0;
 int spot_value      = 0;
 int left_arm_value  = 0;
 int right_arm_value = 0;
-int neck_value      = 0;
-int jaw_value       = 0;
+int neck_value       = 0;  // joystick X-axis raw
+int jaw_value        = 0;  // joystick Y-axis raw
+int neck_left_value  = 0;
+int neck_right_value = 0;
 
 // Controller battery (millivolts), updated by battery timer, read by sendToXIAO()
 uint16_t bat1_mv = 0;
@@ -291,17 +293,21 @@ void loop() {
   spot_value      = processPot(ADS_01.readADC(2), 255);
   left_arm_value  = processPot(ADS_02.readADC(0), 255);
   right_arm_value = processPot(ADS_02.readADC(1), 255);
-  neck_value      = 255 - processPot(ADS_02.readADC(2), 255);
-  jaw_value       = processPot(ADS_02.readADC(3), 255);
+  neck_value      = processPot(ADS_02.readADC(2), 255);  // joystick X
+  jaw_value       = processPot(ADS_02.readADC(3), 255);  // joystick Y
   // --- END ADC READS ---
+
+  // Neck mixer: Y sets base height, X steers left/right differentially
+  neck_left_value  = constrain(jaw_value + (neck_value - 127), 0, 255);
+  neck_right_value = constrain(jaw_value - (neck_value - 127), 0, 255);
 
   xmitData.volume_xmit      = volume_value;
   xmitData.eyes_xmit        = eyes_value;
   xmitData.spot_xmit        = spot_value;
   xmitData.left_arm_xmit    = left_arm_value;
   xmitData.right_arm_xmit   = right_arm_value;
-  xmitData.neck_xmit        = neck_value;
-  xmitData.jaw_xmit         = jaw_value;
+  xmitData.neck_left_xmit   = neck_left_value;
+  xmitData.neck_right_xmit  = neck_right_value;
 
   // --- BATTERY RELATED ---
   if (currentMillis - battery_01_previousMillis >= battery_01_interval) {
@@ -420,8 +426,8 @@ void sendToXIAO() {
   pkt.spot       = (uint8_t)spot_value;
   pkt.left_arm   = (uint8_t)left_arm_value;
   pkt.right_arm  = (uint8_t)right_arm_value;
-  pkt.neck       = (uint8_t)neck_value;
-  pkt.jaw        = (uint8_t)jaw_value;
+  pkt.neck       = (uint8_t)neck_left_value;
+  pkt.jaw        = (uint8_t)neck_right_value;
   pkt.bat1_mv    = bat1_mv;
   pkt.bat2_raw   = (int16_t)rcvData.battery_02_voltage_rcv;
   pkt.bat3_raw   = (int16_t)rcvData.battery_03_voltage_rcv;
@@ -449,8 +455,8 @@ void labelsDisplaySprite() {
   screen_bottom_sprite_203.drawString("SPOT: ",    0,  80, 2);
   screen_bottom_sprite_203.drawString("L-ARM: ",   0, 100, 2);
   screen_bottom_sprite_203.drawString("R-ARM: ",   0, 120, 2);
-  screen_bottom_sprite_203.drawString("NECK: ",    0, 140, 2);
-  screen_bottom_sprite_203.drawString("JAW: ",     0, 160, 2);
+  screen_bottom_sprite_203.drawString("NK-L: ",    0, 140, 2);
+  screen_bottom_sprite_203.drawString("NK-R: ",    0, 160, 2);
 }
 
 
@@ -468,8 +474,8 @@ void dataDisplaySprite() {
   screen_bottom_sprite_203.drawString(String(spot_value),      70,  80, 2);
   screen_bottom_sprite_203.drawString(String(left_arm_value),  70, 100, 2);
   screen_bottom_sprite_203.drawString(String(right_arm_value), 70, 120, 2);
-  screen_bottom_sprite_203.drawString(String(neck_value),      70, 140, 2);
-  screen_bottom_sprite_203.drawString(String(jaw_value),       70, 160, 2);
+  screen_bottom_sprite_203.drawString(String(neck_left_value),  70, 140, 2);
+  screen_bottom_sprite_203.drawString(String(neck_right_value), 70, 160, 2);
 }
 
 
