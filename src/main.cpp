@@ -291,7 +291,7 @@ void loop() {
   spot_value      = processPot(ADS_01.readADC(2), 255);
   left_arm_value  = processPot(ADS_02.readADC(0), 255);
   right_arm_value = processPot(ADS_02.readADC(1), 255);
-  neck_value      = processPot(ADS_02.readADC(2), 255);
+  neck_value      = 255 - processPot(ADS_02.readADC(2), 255);
   jaw_value       = processPot(ADS_02.readADC(3), 255);
   // --- END ADC READS ---
 
