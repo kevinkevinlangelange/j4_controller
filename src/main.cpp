@@ -3,7 +3,7 @@
 //     v0_1 created:  2023-11-08 -- 1209 CST
 //     v0_6 created:  2023-11-16 -- 2226 CST
 //   v0_6_4 created:  2026-05-20 -- 0700 CDT
-//     last updated:  2026-05-22 -- CDT
+//     last updated:  2026-05-31 -- 1127 CDT
 //           author:  Kevin Lange
 //      description:  Main code for Johnny 4 controller/transmitter
 //                    running on a LILYGO TTGO T-Display v1.1 ESP32 board
