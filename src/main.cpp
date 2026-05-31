@@ -3,7 +3,7 @@
 //     v0_1 created:  2023-11-08 -- 1209 CST
 //     v0_6 created:  2023-11-16 -- 2226 CST
 //   v0_6_4 created:  2026-05-20 -- 0700 CDT
-//     last updated:  2026-05-31 -- 1203 CDT
+//     last updated:  2026-05-31 -- 1752 CDT
 //           author:  Kevin Lange
 //      description:  Main code for Johnny 4 controller/transmitter
 //                    running on a LILYGO TTGO T-Display v1.1 ESP32 board
@@ -86,6 +86,7 @@ void sendToXIAO();
 #define XIAO_TX_PIN  17   // GPIO17 output → XIAO D7 (GPIO44)
 #define XIAO_RX_PIN  27   // GPIO27 input  ← XIAO D6 (GPIO43)
 #define XIAO_BAUD    115200
+#define JOYSTICK_DEAD_ZONE 8  // counts either side of 127 to snap to center
 
 // Binary packet sent to the XIAO display board over Serial1.
 // Both ends must keep this struct identical.
@@ -296,6 +297,10 @@ void loop() {
   neck_value      = processPot(ADS_02.readADC(2), 255);  // joystick X
   jaw_value       = processPot(ADS_02.readADC(3), 255);  // joystick Y
   // --- END ADC READS ---
+
+  // Dead zone: snap joystick axes to center if within threshold
+  if (abs(neck_value - 127) <= JOYSTICK_DEAD_ZONE) neck_value = 127;
+  if (abs(jaw_value  - 127) <= JOYSTICK_DEAD_ZONE) jaw_value  = 127;
 
   // Neck mixer: Y sets base height, X steers left/right differentially
   neck_left_value  = constrain(jaw_value + (neck_value - 127), 0, 255);
