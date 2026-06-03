@@ -4,6 +4,7 @@
 //     v0_6 created:  2023-11-16 -- 2226 CST
 //   v0_6_4 created:  2026-05-20 -- 0700 CDT
 //     last updated:  2026-05-31 -- 1752 CDT
+//     last updated:  2026-06-02 -- 1045 CDT
 //           author:  Kevin Lange
 //      description:  Main code for Johnny 4 controller/transmitter
 //                    running on a LILYGO TTGO T-Display v1.1 ESP32 board
@@ -16,6 +17,8 @@
 //                  v0_6_4 -- Condensed; removed dead code; pot processing
 //                            extracted into processPot() helper
 //                  v0_6_5 -- Added UART link to XIAO ESP32S3 display board
+//                  v0_6_6 -- Jukebox: receive file list chunks from j4_receiver,
+//                            forward to j4_display via second UART packet type
 //
 //
 //
@@ -76,6 +79,7 @@ void labelsDisplaySprite();
 void dataDisplaySprite();
 void tftDisplayUpdate();
 void sendToXIAO();
+void sendFileListToXIAO();
 // ------------------------------------------
 
 
@@ -106,6 +110,39 @@ typedef struct __attribute__((packed)) {
   char     phrase[32];     // null-terminated phrase name (e.g. "A12")
   uint8_t  checksum;       // XOR of all preceding bytes in the packet
 } disp_pkt_t;
+
+// File list packet - second packet type on the same UART link.
+// Magic 0xBE, 0xCD distinguishes it from the control packet (0xAB, 0xCD).
+// Sent once after the file list is fully received from j4_receiver.
+#define MAX_FILES      50
+#define FILE_ID_LEN     2
+#define FILE_NAME_MAX  22
+#define FILES_PER_CHUNK 5
+
+typedef struct __attribute__((packed)) {
+  uint8_t magic[2];        // 0xBE, 0xCD
+  uint8_t total_files;
+  struct {
+    char id[FILE_ID_LEN];
+    char name[FILE_NAME_MAX];
+  } files[MAX_FILES];
+  uint8_t checksum;
+} filelist_pkt_t;
+
+// ESP-NOW packet type byte from j4_receiver
+#define ESPNOW_PKT_CONTROL  0x01
+#define ESPNOW_PKT_FILELIST 0x02
+
+typedef struct __attribute__((packed)) {
+  uint8_t pkt_type;
+  uint8_t chunk_index;
+  uint8_t total_chunks;
+  uint8_t entry_count;
+  struct {
+    char id[FILE_ID_LEN];
+    char name[FILE_NAME_MAX];
+  } entries[FILES_PER_CHUNK];
+} espnow_filelist_chunk_t;
 // --- END XIAO LINK ---
 
 
@@ -141,6 +178,13 @@ esp_now_peer_info_t peerInfo;
 volatile bool connectError = LOW;
 String connectStatus = "NO INFO";
 // --- END ESP-NOW RELATED ---
+
+// --- JUKEBOX FILE LIST ---
+filelist_pkt_t jukeboxPkt;
+bool           jukeboxReady       = false;
+uint8_t        chunksReceived     = 0;
+uint8_t        chunksExpected     = 0;
+// --- END JUKEBOX FILE LIST ---
 
 
 // Potentiometer values
@@ -416,7 +460,43 @@ void OnDataSent(const uint8_t *mac_addr, esp_now_send_status_t status) {
 }
 
 void OnDataRecv(const uint8_t *mac, const uint8_t *incomingData, int len) {
-  memcpy(&rcvData, incomingData, sizeof(rcvData));
+  if (len < 1) return;
+
+  uint8_t pkt_type = incomingData[0];
+
+  if (pkt_type == ESPNOW_PKT_FILELIST && len == sizeof(espnow_filelist_chunk_t)) {
+    const espnow_filelist_chunk_t *chunk = (const espnow_filelist_chunk_t *)incomingData;
+
+    if (chunk->chunk_index == 0) {
+      // First chunk - reset and initialise the accumulator
+      memset(&jukeboxPkt, 0, sizeof(jukeboxPkt));
+      jukeboxPkt.magic[0] = 0xBE;
+      jukeboxPkt.magic[1] = 0xCD;
+      jukeboxPkt.total_files = 0;
+      chunksReceived = 0;
+      jukeboxReady   = false;
+    }
+
+    chunksExpected = chunk->total_chunks;
+
+    for (uint8_t i = 0; i < chunk->entry_count && jukeboxPkt.total_files < MAX_FILES; i++) {
+      uint8_t idx = jukeboxPkt.total_files;
+      memcpy(jukeboxPkt.files[idx].id,   chunk->entries[i].id,   FILE_ID_LEN);
+      memcpy(jukeboxPkt.files[idx].name, chunk->entries[i].name, FILE_NAME_MAX);
+      jukeboxPkt.total_files++;
+    }
+
+    chunksReceived++;
+
+    if (chunksReceived >= chunksExpected) {
+      jukeboxReady = true;
+      sendFileListToXIAO();
+    }
+
+  } else {
+    // Regular control packet
+    memcpy(&rcvData, incomingData, sizeof(rcvData));
+  }
 }
 // --- END ESP-NOW RELATED ---
 
@@ -447,6 +527,16 @@ void sendToXIAO() {
   pkt.checksum = cs;
 
   Serial1.write((const uint8_t *)&pkt, sizeof(pkt));
+}
+// --- END XIAO LINK ---
+
+
+void sendFileListToXIAO() {
+  uint8_t cs = 0;
+  const uint8_t *p = (const uint8_t *)&jukeboxPkt;
+  for (size_t i = 0; i < sizeof(jukeboxPkt) - 1; i++) cs ^= p[i];
+  jukeboxPkt.checksum = cs;
+  Serial1.write((const uint8_t *)&jukeboxPkt, sizeof(jukeboxPkt));
 }
 // --- END XIAO LINK ---
 
