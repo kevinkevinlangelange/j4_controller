@@ -1,10 +1,14 @@
 //******************************************************************************
-//       file name:  j4_controller_v0_6_4.ino
+//       file name:  j4_controller.ino
 //     v0_1 created:  2023-11-08 -- 1209 CST
 //     v0_6 created:  2023-11-16 -- 2226 CST
 //   v0_6_4 created:  2026-05-20 -- 0700 CDT
 //     last updated:  2026-05-31 -- 1752 CDT
 //     last updated:  2026-06-02 -- 1045 CDT
+//     last updated:  2026-06-07 -- CDT
+//     last updated:  2026-06-10 -- CDT
+//
+//
 //           author:  Kevin Lange
 //      description:  Main code for Johnny 4 controller/transmitter
 //                    running on a LILYGO TTGO T-Display v1.1 ESP32 board
@@ -19,6 +23,12 @@
 //                  v0_6_5 -- Added UART link to XIAO ESP32S3 display board
 //                  v0_6_6 -- Jukebox: receive file list chunks from j4_receiver,
 //                            forward to j4_display via second UART packet type
+//                  v0_6_7 -- Replaced String members in ESP-NOW structs with fixed
+//                            char arrays (matching j4_receiver v0_7r_6)
+//                         -- Control packet now carries need_filelist flag so the
+//                            receiver re-sends the list if we boot late
+//                         -- Answer LIST? requests from j4_display so a display
+//                            reboot recovers the file list from our cached copy
 //
 //
 //
@@ -90,7 +100,7 @@ void sendFileListToXIAO();
 #define XIAO_TX_PIN  17   // GPIO17 output → XIAO D7 (GPIO44)
 #define XIAO_RX_PIN  27   // GPIO27 input  ← XIAO D6 (GPIO43)
 #define XIAO_BAUD    115200
-#define JOYSTICK_DEAD_ZONE 8  // counts either side of 127 to snap to center
+#define JOYSTICK_DEAD_ZONE 200  // counts either side of 1600 to snap to center (scaled for 0-3200 range)
 
 // Binary packet sent to the XIAO display board over Serial1.
 // Both ends must keep this struct identical.
@@ -129,9 +139,10 @@ typedef struct __attribute__((packed)) {
   uint8_t checksum;
 } filelist_pkt_t;
 
-// ESP-NOW packet type byte from j4_receiver
-#define ESPNOW_PKT_CONTROL  0x01
-#define ESPNOW_PKT_FILELIST 0x02
+// ESP-NOW packet type byte - first byte of every payload
+#define ESPNOW_PKT_CONTROL  0x01  // controller -> receiver (sticks, pots, phrase select)
+#define ESPNOW_PKT_FILELIST 0x02  // receiver -> controller (file list chunk)
+#define ESPNOW_PKT_STATUS   0x03  // receiver -> controller (now playing, batteries)
 
 typedef struct __attribute__((packed)) {
   uint8_t pkt_type;
@@ -153,23 +164,29 @@ ADS1115 ADS_02(0x49);  // ADDRESS PIN TO VDD
 // --- ESP-NOW RELATED ---
 uint8_t broadcastAddress[] = { 0xA0, 0xDD, 0x6C, 0x74, 0xDA, 0x74 };  //MAY 2026 TTGO 2026-05-01--1238-KL
 
-typedef struct struct_message_rcv {
-  String phrase_playing_rcv;
-  int battery_02_voltage_rcv;
-  int battery_03_voltage_rcv;
+// Both ends must keep these structs identical to the ones in j4_receiver.
+// Packed with fixed-size char arrays -- no String members, they don't survive
+// the memcpy across ESP-NOW (the receiver would get a pointer, not the text).
+typedef struct __attribute__((packed)) struct_message_rcv {
+  uint8_t pkt_type;                  // ESPNOW_PKT_STATUS
+  char    phrase_playing_rcv[32];
+  int16_t battery_02_voltage_rcv;
+  int16_t battery_03_voltage_rcv;
 } struct_message_rcv;
 
 struct_message_rcv rcvData;
 
-typedef struct struct_message_xmit {
-  String phrase_select_xmit;
-  int volume_xmit;
-  int eyes_xmit;
-  int spot_xmit;
-  int left_arm_xmit;
-  int right_arm_xmit;
-  int neck_left_xmit;
-  int neck_right_xmit;
+typedef struct __attribute__((packed)) struct_message_xmit {
+  uint8_t pkt_type;                  // ESPNOW_PKT_CONTROL
+  char    phrase_select_xmit[8];
+  int16_t volume_xmit;
+  int16_t eyes_xmit;
+  int16_t spot_xmit;
+  int16_t left_arm_xmit;
+  int16_t right_arm_xmit;
+  int16_t neck_left_xmit;
+  int16_t neck_right_xmit;
+  uint8_t need_filelist_xmit;        // 1 = still waiting on the file list
 } struct_message_xmit;
 
 struct_message_xmit xmitData;
@@ -184,6 +201,7 @@ filelist_pkt_t jukeboxPkt;
 bool           jukeboxReady       = false;
 uint8_t        chunksReceived     = 0;
 uint8_t        chunksExpected     = 0;
+String         xiaoSerialBuf      = "";
 // --- END JUKEBOX FILE LIST ---
 
 
@@ -309,6 +327,9 @@ void setup() {
   }
   connectStatus = "peer added";
 
+  xmitData.pkt_type = ESPNOW_PKT_CONTROL;
+  xmitData.phrase_select_xmit[0] = '\0';
+
   tft.init();
   tft.setRotation(2);
   tft.fillScreen(TFT_BLACK);
@@ -332,23 +353,36 @@ void loop() {
     sendToXIAO();
   }
 
+  // XIAO display asks for the file list after a reboot
+  while (Serial1.available()) {
+    char c = (char)Serial1.read();
+    if (c == '\n') {
+      xiaoSerialBuf.trim();
+      if (xiaoSerialBuf == "LIST?" && jukeboxReady) sendFileListToXIAO();
+      xiaoSerialBuf = "";
+    } else if (c != '\r') {
+      if (xiaoSerialBuf.length() > 16) xiaoSerialBuf = "";  // line noise guard
+      xiaoSerialBuf += c;
+    }
+  }
+
   // --- ADC READS ---
   volume_value    = processPot(ADS_01.readADC(0), 100);
   eyes_value      = processPot(ADS_01.readADC(1), 255);
   spot_value      = processPot(ADS_01.readADC(2), 255);
   left_arm_value  = processPot(ADS_02.readADC(0), 255);
   right_arm_value = processPot(ADS_02.readADC(1), 255);
-  neck_value      = processPot(ADS_02.readADC(2), 255);  // joystick X
-  jaw_value       = processPot(ADS_02.readADC(3), 255);  // joystick Y
+  neck_value      = processPot(ADS_02.readADC(2), 3200);  // joystick X
+  jaw_value       = processPot(ADS_02.readADC(3), 3200);  // joystick Y
   // --- END ADC READS ---
 
   // Dead zone: snap joystick axes to center if within threshold
-  if (abs(neck_value - 127) <= JOYSTICK_DEAD_ZONE) neck_value = 127;
-  if (abs(jaw_value  - 127) <= JOYSTICK_DEAD_ZONE) jaw_value  = 127;
+  if (abs(neck_value - 1600) <= JOYSTICK_DEAD_ZONE) neck_value = 1600;
+  if (abs(jaw_value  - 1600) <= JOYSTICK_DEAD_ZONE) jaw_value  = 1600;
 
   // Neck mixer: Y sets base height, X steers left/right differentially
-  neck_left_value  = constrain(jaw_value + (neck_value - 127), 0, 255);
-  neck_right_value = constrain(jaw_value - (neck_value - 127), 0, 255);
+  neck_left_value  = constrain(jaw_value + (neck_value - 1600), 0, 3200);
+  neck_right_value = constrain(jaw_value - (neck_value - 1600), 0, 3200);
 
   xmitData.volume_xmit      = volume_value;
   xmitData.eyes_xmit        = eyes_value;
@@ -357,6 +391,7 @@ void loop() {
   xmitData.right_arm_xmit   = right_arm_value;
   xmitData.neck_left_xmit   = neck_left_value;
   xmitData.neck_right_xmit  = neck_right_value;
+  xmitData.need_filelist_xmit = jukeboxReady ? 0 : 1;
 
   // --- BATTERY RELATED ---
   if (currentMillis - battery_01_previousMillis >= battery_01_interval) {
@@ -410,7 +445,8 @@ void loop() {
         } else if (kc == '*') {  // stop playback
           old_key = -1;
           phrase_select_buffer = "STOP";
-          xmitData.phrase_select_xmit = phrase_select_buffer;
+          strncpy(xmitData.phrase_select_xmit, phrase_select_buffer.c_str(), sizeof(xmitData.phrase_select_xmit) - 1);
+          xmitData.phrase_select_xmit[sizeof(xmitData.phrase_select_xmit) - 1] = '\0';
           screen_bottom_sprite_203.setTextColor(TFT_GREEN);
           screen_bottom_sprite_203.fillRect(70,  0, 65, 20, TFT_BLACK);
           screen_bottom_sprite_203.drawString("*",                  70,  0, 2);
@@ -434,7 +470,8 @@ void loop() {
             screen_bottom_sprite_203.fillRect(70, 20, 65, 20, TFT_BLACK);
             screen_bottom_sprite_203.drawString(phrase_select_buffer + ".wav", 70, 20, 2);
 
-            xmitData.phrase_select_xmit = phrase_select_buffer;
+            strncpy(xmitData.phrase_select_xmit, phrase_select_buffer.c_str(), sizeof(xmitData.phrase_select_xmit) - 1);
+            xmitData.phrase_select_xmit[sizeof(xmitData.phrase_select_xmit) - 1] = '\0';
             phrase_select_buffer = "";
           }
         }
@@ -493,8 +530,7 @@ void OnDataRecv(const uint8_t *mac, const uint8_t *incomingData, int len) {
       sendFileListToXIAO();
     }
 
-  } else {
-    // Regular control packet
+  } else if (pkt_type == ESPNOW_PKT_STATUS && len == sizeof(struct_message_rcv)) {
     memcpy(&rcvData, incomingData, sizeof(rcvData));
   }
 }
@@ -511,13 +547,13 @@ void sendToXIAO() {
   pkt.spot       = (uint8_t)spot_value;
   pkt.left_arm   = (uint8_t)left_arm_value;
   pkt.right_arm  = (uint8_t)right_arm_value;
-  pkt.neck       = (uint8_t)neck_left_value;
-  pkt.jaw        = (uint8_t)neck_right_value;
+  pkt.neck       = (uint8_t)map(neck_left_value,  0, 3200, 0, 255);
+  pkt.jaw        = (uint8_t)map(neck_right_value, 0, 3200, 0, 255);
   pkt.bat1_mv    = bat1_mv;
-  pkt.bat2_raw   = (int16_t)rcvData.battery_02_voltage_rcv;
-  pkt.bat3_raw   = (int16_t)rcvData.battery_03_voltage_rcv;
+  pkt.bat2_raw   = rcvData.battery_02_voltage_rcv;
+  pkt.bat3_raw   = rcvData.battery_03_voltage_rcv;
   pkt.connect_ok = connectError ? 0 : 1;
-  strncpy(pkt.phrase, rcvData.phrase_playing_rcv.c_str(), sizeof(pkt.phrase) - 1);
+  strncpy(pkt.phrase, rcvData.phrase_playing_rcv, sizeof(pkt.phrase) - 1);
   pkt.phrase[sizeof(pkt.phrase) - 1] = '\0';
 
   // XOR checksum over all bytes except the final checksum byte
