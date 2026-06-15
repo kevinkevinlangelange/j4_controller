@@ -12,7 +12,10 @@ Johnny 4 is a prop robot controlled wirelessly. This board is the handheld contr
 - Reads a 4x4 matrix keypad via PCF8574 I2C expander using a custom scan routine
 - Supports jukebox-style audio phrase selection: press a letter (A-D) then a digit (0-9) to queue a phrase, or press a digit alone to queue a 0x phrase (e.g. pressing 8 queues "08.wav")
 - Press `*` to send a STOP command, press `#` to clear the buffer
-- Transmits all control data to the robot receiver via ESP-NOW
+- Mixes the joystick into differential neck-left / neck-right values over a 0-3200 range
+- Transmits all control data to the robot receiver via ESP-NOW (fixed-size packed structs, no `String` members so they survive the wireless `memcpy`)
+- Receives the jukebox file list from the robot receiver in chunks and forwards it to the display board; carries a `need_filelist` flag so the receiver re-sends the list if this board boots late
+- Answers `LIST?` requests from the display board out of its cached copy, so a display reboot recovers the list without a full round trip
 - Displays live pot values, keypress state, and battery voltage on the built-in TFT
 - Sends a 49-byte binary status packet to the XIAO ESP32S3 display board at 25 fps over UART
 
@@ -36,6 +39,22 @@ Johnny 4 is a prop robot controlled wirelessly. This board is the handheld contr
 | 34 | Battery voltage sense (ADC input, read-only) |
 
 Potentiometer inputs are routed through the ADS1115 modules. GPIO 12 causes boot/flash issues when connected to a pot and is avoided. GPIO 17 is unreliable as an input and is used only as TX. Pins 36, 37, and 38 are input-only.
+
+## Pin diagram
+
+```
+                  TTGO T-Display v1.1 (ESP32)  -  j4_controller
+                  +--------------------------------------+
+   I2C SDA <----->| 21    ADS1115 x2 (0x48/0x49)         |
+   I2C SCL <----->| 22    PCF8574 keypad (0x20)          |
+                  |                            [ ST7789 1.14" TFT ]
+   XIAO D7 RX <---| 17 (UART TX)                         |
+   XIAO D6 TX --->| 27 (UART RX)                  34 |<-- battery sense (ADC in)
+                  |              3V3   GND   USB         |
+                  +--------------------------------------+
+                          |
+                          +-- ESP-NOW (wireless) <--> j4_receiver
+```
 
 ## Keypad wiring
 
