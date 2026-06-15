@@ -8,7 +8,7 @@ Johnny 4 is a prop robot controlled wirelessly. This board is the handheld contr
 
 ## What this firmware does
 
-- Reads analog potentiometers via two ADS1115 ADC modules: volume, iris (100K linear pot), an eyes joystick (eyes_x / eyes_y), and the neck joystick (neck X / jaw Y)
+- Reads analog potentiometers via two ADS1115 ADC modules: volume, iris (100K linear pot), eye-pop, an eyes joystick (eyes_x / eyes_y), and the neck joystick (neck X / jaw Y)
 - Reads a 4x4 matrix keypad via PCF8574 I2C expander using a custom scan routine
 - Supports jukebox-style audio phrase selection: press a letter (A-D) then a digit (0-9) to queue a phrase, or press a digit alone to queue a 0x phrase (e.g. pressing 8 queues "08.wav")
 - Press `*` to send a STOP command, press `#` to clear the buffer
@@ -64,13 +64,13 @@ The pots feed two ADS1115 modules over I2C. The eye controls reuse the channels 
 |--------|---------|---------|
 | ADS_01 (0x48) | A0 | Volume |
 | ADS_01 (0x48) | A1 | Iris (100K linear pot, was eyes) |
-| ADS_01 (0x48) | A2 | Unused (was spot) |
+| ADS_01 (0x48) | A2 | Eye-pop (0-3200, was spot) |
 | ADS_02 (0x49) | A0 | Eyes joystick X / eyes_x (was left arm) |
 | ADS_02 (0x49) | A1 | Eyes joystick Y / eyes_y (was right arm) |
 | ADS_02 (0x49) | A2 | Neck joystick X |
 | ADS_02 (0x49) | A3 | Neck joystick Y (jaw, feeds neck mixer) |
 
-eyes_x, eyes_y, and iris are sent to j4_receiver over ESP-NOW and drive servos on its PCA9685. The neck joystick still mixes into neck-L / neck-R as before.
+eyes_x, eyes_y, and iris are sent to j4_receiver over ESP-NOW and drive servos on its PCA9685. eye-pop is sent on the same packet and is forwarded to j4_stepper, where it drives the eye-pop steppers with the neck's motion settings. The neck joystick still mixes into neck-L / neck-R as before.
 
 ## Keypad wiring
 

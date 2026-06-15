@@ -31,12 +31,13 @@
 //                         -- Answer LIST? requests from j4_display so a display
 //                            reboot recovers the file list from our cached copy
 //                  v0_6_8 -- Repurposed the eyes/spot/left-arm/right-arm pots into
-//                            eye controls: iris (was eyes pot), eyes_x (was left-arm),
-//                            eyes_y (was right-arm). Spot control removed. ESP-NOW
-//                            control packet now carries iris/eyes_x/eyes_y in place
-//                            of eyes/spot/left_arm/right_arm. Neck joystick, volume,
-//                            and the jukebox are unchanged. disp_pkt_t to j4_display
-//                            keeps its layout (iris/eyes_x/eyes_y reuse old slots).
+//                            eye controls: iris (was eyes pot), eye-pop (was spot
+//                            pot, 0-3200 like neck), eyes_x (was left-arm), eyes_y
+//                            (was right-arm). ESP-NOW control packet now carries
+//                            iris/eyes_x/eyes_y/eye_pop in place of eyes/spot/
+//                            left_arm/right_arm. Neck joystick, volume, and the
+//                            jukebox are unchanged. disp_pkt_t to j4_display keeps
+//                            its layout (the new controls reuse the old slots).
 //
 //
 //
@@ -191,6 +192,7 @@ typedef struct __attribute__((packed)) struct_message_xmit {
   int16_t iris_xmit;                 // 270-deg iris servo (was eyes pot)
   int16_t eyes_x_xmit;               // eyes joystick X -> eyes_x servo (was left_arm pot)
   int16_t eyes_y_xmit;               // eyes joystick Y -> eyes_y servo (was right_arm pot)
+  int16_t eye_pop_xmit;              // eye-pop steppers, 0-3200 like neck (was spot pot)
   int16_t neck_left_xmit;
   int16_t neck_right_xmit;
   uint8_t need_filelist_xmit;        // 1 = still waiting on the file list
@@ -217,6 +219,7 @@ int volume_value    = 0;
 int iris_value      = 0;   // iris 100K linear pot (was eyes pot)
 int eyes_x_value    = 0;   // eyes joystick X (was left-arm pot)
 int eyes_y_value    = 0;   // eyes joystick Y (was right-arm pot)
+int eye_pop_value   = 0;   // eye-pop steppers, 0-3200 (was spot pot)
 int neck_value       = 0;  // joystick X-axis raw
 int jaw_value        = 0;  // joystick Y-axis raw
 int neck_left_value  = 0;
@@ -375,7 +378,7 @@ void loop() {
   // --- ADC READS ---
   volume_value    = processPot(ADS_01.readADC(0), 100);
   iris_value      = processPot(ADS_01.readADC(1), 255);   // was eyes pot
-  // ADS_01 ch2 (was spot) is unused now
+  eye_pop_value   = processPot(ADS_01.readADC(2), 3200);  // eye-pop, 0-3200 like neck (was spot pot)
   eyes_x_value    = processPot(ADS_02.readADC(0), 255);   // eyes joystick X (was left-arm pot)
   eyes_y_value    = processPot(ADS_02.readADC(1), 255);   // eyes joystick Y (was right-arm pot)
   neck_value      = processPot(ADS_02.readADC(2), 3200);  // joystick X
@@ -394,6 +397,7 @@ void loop() {
   xmitData.iris_xmit        = iris_value;
   xmitData.eyes_x_xmit      = eyes_x_value;
   xmitData.eyes_y_xmit      = eyes_y_value;
+  xmitData.eye_pop_xmit     = eye_pop_value;
   xmitData.neck_left_xmit   = neck_left_value;
   xmitData.neck_right_xmit  = neck_right_value;
   xmitData.need_filelist_xmit = jukeboxReady ? 0 : 1;
@@ -548,10 +552,11 @@ void sendToXIAO() {
   pkt.magic[0]   = 0xAB;
   pkt.magic[1]   = 0xCD;
   // disp_pkt_t is kept byte-for-byte compatible with j4_display, so the new
-  // controls reuse existing slots: eyes<-iris, left_arm<-eyes_x, right_arm<-eyes_y.
+  // controls reuse existing slots: eyes<-iris, spot<-eye_pop, left_arm<-eyes_x,
+  // right_arm<-eyes_y.
   pkt.volume     = (uint8_t)volume_value;
   pkt.eyes       = (uint8_t)iris_value;
-  pkt.spot       = 0;                         // spot control removed
+  pkt.spot       = (uint8_t)map(eye_pop_value, 0, 3200, 0, 255);
   pkt.left_arm   = (uint8_t)eyes_x_value;
   pkt.right_arm  = (uint8_t)eyes_y_value;
   pkt.neck       = (uint8_t)map(neck_left_value,  0, 3200, 0, 255);
@@ -590,7 +595,7 @@ void labelsDisplaySprite() {
   screen_bottom_sprite_203.drawString("Playing: ", 0,  20, 2);
   screen_bottom_sprite_203.drawString("VOL: ",     0,  40, 2);
   screen_bottom_sprite_203.drawString("IRIS: ",    0,  60, 2);
-  screen_bottom_sprite_203.drawString("----: ",    0,  80, 2);
+  screen_bottom_sprite_203.drawString("EYE-P: ",   0,  80, 2);
   screen_bottom_sprite_203.drawString("EYE-X: ",   0, 100, 2);
   screen_bottom_sprite_203.drawString("EYE-Y: ",   0, 120, 2);
   screen_bottom_sprite_203.drawString("NK-L: ",    0, 140, 2);
@@ -609,7 +614,7 @@ void dataDisplaySprite() {
 
   screen_bottom_sprite_203.drawString(String(volume_value),    70,  40, 2);
   screen_bottom_sprite_203.drawString(String(iris_value),      70,  60, 2);
-  screen_bottom_sprite_203.drawString("-",                     70,  80, 2);
+  screen_bottom_sprite_203.drawString(String(eye_pop_value),   70,  80, 2);
   screen_bottom_sprite_203.drawString(String(eyes_x_value),    70, 100, 2);
   screen_bottom_sprite_203.drawString(String(eyes_y_value),    70, 120, 2);
   screen_bottom_sprite_203.drawString(String(neck_left_value),  70, 140, 2);
