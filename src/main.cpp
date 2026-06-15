@@ -7,6 +7,7 @@
 //     last updated:  2026-06-02 -- 1045 CDT
 //     last updated:  2026-06-07 -- CDT
 //     last updated:  2026-06-10 -- CDT
+//     last updated:  2026-06-15 -- CDT
 //
 //
 //           author:  Kevin Lange
@@ -29,6 +30,13 @@
 //                            receiver re-sends the list if we boot late
 //                         -- Answer LIST? requests from j4_display so a display
 //                            reboot recovers the file list from our cached copy
+//                  v0_6_8 -- Repurposed the eyes/spot/left-arm/right-arm pots into
+//                            eye controls: iris (was eyes pot), eyes_x (was left-arm),
+//                            eyes_y (was right-arm). Spot control removed. ESP-NOW
+//                            control packet now carries iris/eyes_x/eyes_y in place
+//                            of eyes/spot/left_arm/right_arm. Neck joystick, volume,
+//                            and the jukebox are unchanged. disp_pkt_t to j4_display
+//                            keeps its layout (iris/eyes_x/eyes_y reuse old slots).
 //
 //
 //
@@ -180,10 +188,9 @@ typedef struct __attribute__((packed)) struct_message_xmit {
   uint8_t pkt_type;                  // ESPNOW_PKT_CONTROL
   char    phrase_select_xmit[8];
   int16_t volume_xmit;
-  int16_t eyes_xmit;
-  int16_t spot_xmit;
-  int16_t left_arm_xmit;
-  int16_t right_arm_xmit;
+  int16_t iris_xmit;                 // 270-deg iris servo (was eyes pot)
+  int16_t eyes_x_xmit;               // eyes joystick X -> eyes_x servo (was left_arm pot)
+  int16_t eyes_y_xmit;               // eyes joystick Y -> eyes_y servo (was right_arm pot)
   int16_t neck_left_xmit;
   int16_t neck_right_xmit;
   uint8_t need_filelist_xmit;        // 1 = still waiting on the file list
@@ -207,10 +214,9 @@ String         xiaoSerialBuf      = "";
 
 // Potentiometer values
 int volume_value    = 0;
-int eyes_value      = 0;
-int spot_value      = 0;
-int left_arm_value  = 0;
-int right_arm_value = 0;
+int iris_value      = 0;   // iris 100K linear pot (was eyes pot)
+int eyes_x_value    = 0;   // eyes joystick X (was left-arm pot)
+int eyes_y_value    = 0;   // eyes joystick Y (was right-arm pot)
 int neck_value       = 0;  // joystick X-axis raw
 int jaw_value        = 0;  // joystick Y-axis raw
 int neck_left_value  = 0;
@@ -368,10 +374,10 @@ void loop() {
 
   // --- ADC READS ---
   volume_value    = processPot(ADS_01.readADC(0), 100);
-  eyes_value      = processPot(ADS_01.readADC(1), 255);
-  spot_value      = processPot(ADS_01.readADC(2), 255);
-  left_arm_value  = processPot(ADS_02.readADC(0), 255);
-  right_arm_value = processPot(ADS_02.readADC(1), 255);
+  iris_value      = processPot(ADS_01.readADC(1), 255);   // was eyes pot
+  // ADS_01 ch2 (was spot) is unused now
+  eyes_x_value    = processPot(ADS_02.readADC(0), 255);   // eyes joystick X (was left-arm pot)
+  eyes_y_value    = processPot(ADS_02.readADC(1), 255);   // eyes joystick Y (was right-arm pot)
   neck_value      = processPot(ADS_02.readADC(2), 3200);  // joystick X
   jaw_value       = processPot(ADS_02.readADC(3), 3200);  // joystick Y
   // --- END ADC READS ---
@@ -385,10 +391,9 @@ void loop() {
   neck_right_value = constrain(jaw_value - (neck_value - 1600), 0, 3200);
 
   xmitData.volume_xmit      = volume_value;
-  xmitData.eyes_xmit        = eyes_value;
-  xmitData.spot_xmit        = spot_value;
-  xmitData.left_arm_xmit    = left_arm_value;
-  xmitData.right_arm_xmit   = right_arm_value;
+  xmitData.iris_xmit        = iris_value;
+  xmitData.eyes_x_xmit      = eyes_x_value;
+  xmitData.eyes_y_xmit      = eyes_y_value;
   xmitData.neck_left_xmit   = neck_left_value;
   xmitData.neck_right_xmit  = neck_right_value;
   xmitData.need_filelist_xmit = jukeboxReady ? 0 : 1;
@@ -542,11 +547,13 @@ void sendToXIAO() {
   disp_pkt_t pkt;
   pkt.magic[0]   = 0xAB;
   pkt.magic[1]   = 0xCD;
+  // disp_pkt_t is kept byte-for-byte compatible with j4_display, so the new
+  // controls reuse existing slots: eyes<-iris, left_arm<-eyes_x, right_arm<-eyes_y.
   pkt.volume     = (uint8_t)volume_value;
-  pkt.eyes       = (uint8_t)eyes_value;
-  pkt.spot       = (uint8_t)spot_value;
-  pkt.left_arm   = (uint8_t)left_arm_value;
-  pkt.right_arm  = (uint8_t)right_arm_value;
+  pkt.eyes       = (uint8_t)iris_value;
+  pkt.spot       = 0;                         // spot control removed
+  pkt.left_arm   = (uint8_t)eyes_x_value;
+  pkt.right_arm  = (uint8_t)eyes_y_value;
   pkt.neck       = (uint8_t)map(neck_left_value,  0, 3200, 0, 255);
   pkt.jaw        = (uint8_t)map(neck_right_value, 0, 3200, 0, 255);
   pkt.bat1_mv    = bat1_mv;
@@ -582,10 +589,10 @@ void labelsDisplaySprite() {
   screen_bottom_sprite_203.setTextColor(TFT_GREEN);
   screen_bottom_sprite_203.drawString("Playing: ", 0,  20, 2);
   screen_bottom_sprite_203.drawString("VOL: ",     0,  40, 2);
-  screen_bottom_sprite_203.drawString("EYES: ",    0,  60, 2);
-  screen_bottom_sprite_203.drawString("SPOT: ",    0,  80, 2);
-  screen_bottom_sprite_203.drawString("L-ARM: ",   0, 100, 2);
-  screen_bottom_sprite_203.drawString("R-ARM: ",   0, 120, 2);
+  screen_bottom_sprite_203.drawString("IRIS: ",    0,  60, 2);
+  screen_bottom_sprite_203.drawString("----: ",    0,  80, 2);
+  screen_bottom_sprite_203.drawString("EYE-X: ",   0, 100, 2);
+  screen_bottom_sprite_203.drawString("EYE-Y: ",   0, 120, 2);
   screen_bottom_sprite_203.drawString("NK-L: ",    0, 140, 2);
   screen_bottom_sprite_203.drawString("NK-R: ",    0, 160, 2);
 }
@@ -601,10 +608,10 @@ void dataDisplaySprite() {
   }
 
   screen_bottom_sprite_203.drawString(String(volume_value),    70,  40, 2);
-  screen_bottom_sprite_203.drawString(String(eyes_value),      70,  60, 2);
-  screen_bottom_sprite_203.drawString(String(spot_value),      70,  80, 2);
-  screen_bottom_sprite_203.drawString(String(left_arm_value),  70, 100, 2);
-  screen_bottom_sprite_203.drawString(String(right_arm_value), 70, 120, 2);
+  screen_bottom_sprite_203.drawString(String(iris_value),      70,  60, 2);
+  screen_bottom_sprite_203.drawString("-",                     70,  80, 2);
+  screen_bottom_sprite_203.drawString(String(eyes_x_value),    70, 100, 2);
+  screen_bottom_sprite_203.drawString(String(eyes_y_value),    70, 120, 2);
   screen_bottom_sprite_203.drawString(String(neck_left_value),  70, 140, 2);
   screen_bottom_sprite_203.drawString(String(neck_right_value), 70, 160, 2);
 }
