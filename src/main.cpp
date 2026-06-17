@@ -47,6 +47,14 @@
 //                            if no status packet arrives, or the reported fault
 //                            (e.g. "NL OT", "EYES OFFLINE"). Green when healthy,
 //                            red otherwise.
+//                 v0_6_10 -- Added a screen-cycle button (TTGO built-in GPIO 35,
+//                            like j4_receiver): data -> MAC address -> connection
+//                            status. The connection screen shows ESP-NOW LINK,
+//                            j4_stepper_neck, j4_stepper_eyes, and j4_display as
+//                            CONNECTED/DISCONNECTED. The status packet now carries
+//                            neck_ok/eyes_ok from the receiver, the control packet
+//                            carries display_ok, and j4_display sends a "PING"
+//                            heartbeat so the controller can see it.
 //
 //
 //
@@ -121,6 +129,10 @@ void OnDataSent(const uint8_t* mac_addr, esp_now_send_status_t status);
 void labelsDisplaySprite();
 void dataDisplaySprite();
 void tftDisplayUpdate();
+void controllerScreenModeDetect();
+void macAddressDisplay();
+void connectionDisplay();
+void drawConnLine(const char *name, bool ok, int row);
 void sendToXIAO();
 void sendFileListToXIAO();
 // ------------------------------------------
@@ -206,6 +218,8 @@ typedef struct __attribute__((packed)) struct_message_rcv {
   int16_t battery_02_voltage_rcv;
   int16_t battery_03_voltage_rcv;
   char    stepper_status_rcv[24];    // from j4_stepper_neck via j4_receiver
+  uint8_t neck_ok_rcv;               // 1 = j4_stepper_neck responding
+  uint8_t eyes_ok_rcv;               // 1 = j4_stepper_eyes responding
 } struct_message_rcv;
 
 struct_message_rcv rcvData;
@@ -221,6 +235,7 @@ typedef struct __attribute__((packed)) struct_message_xmit {
   int16_t neck_left_xmit;
   int16_t neck_right_xmit;
   uint8_t need_filelist_xmit;        // 1 = still waiting on the file list
+  uint8_t display_ok_xmit;           // 1 = controller sees j4_display heartbeat
 } struct_message_xmit;
 
 struct_message_xmit xmitData;
@@ -233,6 +248,18 @@ String connectStatus = "NO INFO";
 // within the timeout, the ESP-NOW link is treated as down ("OFFLINE").
 unsigned long lastStatusRecvMs = 0;
 #define STATUS_LINK_TIMEOUT_MS  1500
+
+// j4_display heartbeat ("PING" or any line on the XIAO link)
+unsigned long lastDisplayMs = 0;
+#define DISPLAY_TIMEOUT_MS  3000
+
+// Screen cycling via the TTGO's built-in button on GPIO 35 (same as j4_receiver).
+// 0 = data, 1 = MAC address, 2 = connection status.
+#define SCREEN_BUTTON  35
+int  screen_mode = 0;
+bool screen_button_prev = HIGH;
+unsigned long screen_button_previousMillis = 0;
+const unsigned long screen_debounce_ms = 50;
 // --- END ESP-NOW RELATED ---
 
 // --- JUKEBOX FILE LIST ---
@@ -380,11 +407,14 @@ void setup() {
   labelsDisplaySprite();
   screen_bottom_sprite_203.drawString("Ready...", 0, 0, 1);
 
+  pinMode(SCREEN_BUTTON, INPUT_PULLUP);   // TTGO built-in button (GPIO 35)
 }
 
 
 void loop() {
   unsigned long currentMillis = millis();
+
+  controllerScreenModeDetect();
 
   if (currentMillis - tft_update_previousMillis >= tft_update_interval) {
     tft_update_previousMillis = currentMillis;
@@ -392,11 +422,12 @@ void loop() {
     sendToXIAO();
   }
 
-  // XIAO display asks for the file list after a reboot
+  // XIAO display: file-list requests + heartbeat ("PING") for connection status
   while (Serial1.available()) {
     char c = (char)Serial1.read();
     if (c == '\n') {
       xiaoSerialBuf.trim();
+      if (xiaoSerialBuf.length() > 0) lastDisplayMs = millis();   // any line = display alive
       if (xiaoSerialBuf == "LIST?" && jukeboxReady) sendFileListToXIAO();
       xiaoSerialBuf = "";
     } else if (c != '\r') {
@@ -431,6 +462,7 @@ void loop() {
   xmitData.neck_left_xmit   = neck_left_value;
   xmitData.neck_right_xmit  = neck_right_value;
   xmitData.need_filelist_xmit = jukeboxReady ? 0 : 1;
+  xmitData.display_ok_xmit    = (millis() - lastDisplayMs < DISPLAY_TIMEOUT_MS) ? 1 : 0;
 
   // --- BATTERY RELATED ---
   if (currentMillis - battery_01_previousMillis >= battery_01_interval) {
@@ -672,6 +704,66 @@ void dataDisplaySprite() {
 
 
 void tftDisplayUpdate() {
-  dataDisplaySprite();
-  screen_bottom_sprite_203.pushSprite(0, 38);
+  if (screen_mode == 0) {
+    dataDisplaySprite();
+    screen_bottom_sprite_203.pushSprite(0, 38);
+  } else if (screen_mode == 1) {
+    macAddressDisplay();
+  } else if (screen_mode == 2) {
+    connectionDisplay();
+  }
+}
+
+
+// Cycle screens with the TTGO's built-in GPIO 35 button: data -> MAC -> status.
+void controllerScreenModeDetect() {
+  if (millis() - screen_button_previousMillis >= screen_debounce_ms) {
+    bool cur = digitalRead(SCREEN_BUTTON);
+    if (screen_button_prev == HIGH && cur == LOW) {
+      screen_mode = (screen_mode + 1) % 3;
+      if (screen_mode == 0) {
+        tft.fillScreen(TFT_BLACK);
+        tft.pushImage(0, 0, 135, 37, kevco_labs_logo_02);
+        labelsDisplaySprite();
+      } else if (screen_mode == 1) {
+        macAddressDisplay();
+      } else if (screen_mode == 2) {
+        tft.fillScreen(TFT_BLACK);   // clear once; connectionDisplay() repaints values
+      }
+      screen_button_previousMillis = millis();
+    }
+    screen_button_prev = cur;
+  }
+}
+
+
+void macAddressDisplay() {
+  tft.fillScreen(TFT_BLACK);
+  tft.setTextColor(TFT_GREEN, TFT_BLACK);
+  tft.drawString("WiFi MAC:", 10, 60, 2);
+  tft.drawString(WiFi.macAddress(), 10, 90, 2);
+}
+
+
+// One "<name>: CONNECTED/DISCONNECTED" row (green/red), label and state stacked.
+void drawConnLine(const char *name, bool ok, int row) {
+  int y = 10 + row * 40;
+  tft.setTextColor(TFT_WHITE, TFT_BLACK);
+  tft.drawString(name, 6, y, 2);
+  tft.setTextColor(ok ? TFT_GREEN : TFT_RED, TFT_BLACK);
+  tft.drawString(ok ? "CONNECTED   " : "DISCONNECTED", 6, y + 17, 2);
+}
+
+
+// Connection-status screen: how this controller sees each link right now.
+void connectionDisplay() {
+  unsigned long now = millis();
+  bool espnow = (now - lastStatusRecvMs) < STATUS_LINK_TIMEOUT_MS;   // receiver link
+  bool dispOk = (now - lastDisplayMs)    < DISPLAY_TIMEOUT_MS;
+  bool neckOk = espnow && rcvData.neck_ok_rcv;                       // relayed by receiver
+  bool eyesOk = espnow && rcvData.eyes_ok_rcv;
+  drawConnLine("ESP-NOW LINK",    espnow, 0);
+  drawConnLine("j4_stepper_neck", neckOk, 1);
+  drawConnLine("j4_stepper_eyes", eyesOk, 2);
+  drawConnLine("j4_display",      dispOk, 3);
 }
