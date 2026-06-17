@@ -50,11 +50,11 @@
 //                 v0_6_10 -- Added a screen-cycle button (TTGO built-in GPIO 35,
 //                            like j4_receiver): data -> MAC address -> connection
 //                            status. The connection screen shows ESP-NOW LINK,
-//                            j4_stepper_neck, j4_stepper_eyes, and j4_display as
-//                            CONNECTED/DISCONNECTED. The status packet now carries
-//                            neck_ok/eyes_ok from the receiver, the control packet
-//                            carries display_ok, and j4_display sends a "PING"
-//                            heartbeat so the controller can see it.
+//                            j4_stepper_neck, j4_stepper_eyes, j4_talk, and
+//                            j4_display as CONNECTED/DISCONNECTED. The status packet
+//                            carries neck_ok/eyes_ok/talk_ok from the receiver, the
+//                            control packet carries display_ok, and j4_display +
+//                            j4_talk send a "PING" heartbeat so they can be seen.
 //
 //
 //
@@ -220,6 +220,7 @@ typedef struct __attribute__((packed)) struct_message_rcv {
   char    stepper_status_rcv[24];    // from j4_stepper_neck via j4_receiver
   uint8_t neck_ok_rcv;               // 1 = j4_stepper_neck responding
   uint8_t eyes_ok_rcv;               // 1 = j4_stepper_eyes responding
+  uint8_t talk_ok_rcv;               // 1 = j4_talk (Teensy) responding
 } struct_message_rcv;
 
 struct_message_rcv rcvData;
@@ -762,8 +763,10 @@ void connectionDisplay() {
   bool dispOk = (now - lastDisplayMs)    < DISPLAY_TIMEOUT_MS;
   bool neckOk = espnow && rcvData.neck_ok_rcv;                       // relayed by receiver
   bool eyesOk = espnow && rcvData.eyes_ok_rcv;
+  bool talkOk = espnow && rcvData.talk_ok_rcv;
   drawConnLine("ESP-NOW LINK",    espnow, 0);
   drawConnLine("j4_stepper_neck", neckOk, 1);
   drawConnLine("j4_stepper_eyes", eyesOk, 2);
-  drawConnLine("j4_display",      dispOk, 3);
+  drawConnLine("j4_talk",         talkOk, 3);
+  drawConnLine("j4_display",      dispOk, 4);
 }

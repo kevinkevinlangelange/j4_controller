@@ -17,7 +17,7 @@ Johnny 4 is a prop robot controlled wirelessly. This board is the handheld contr
 - Receives the jukebox file list from the robot receiver in chunks and forwards it to the display board; carries a `need_filelist` flag so the receiver re-sends the list if this board boots late
 - Answers `LIST?` requests from the display board out of its cached copy, so a display reboot recovers the list without a full round trip
 - Displays live pot values, keypress state, and battery voltage on the built-in TFT
-- The TTGO's built-in button (GPIO 35) cycles the TFT through three screens: live data, WiFi MAC address, and a connection-status screen showing ESP-NOW LINK, j4_stepper_neck, j4_stepper_eyes, and j4_display as CONNECTED (green) / DISCONNECTED (red)
+- The TTGO's built-in button (GPIO 35) cycles the TFT through three screens: live data, WiFi MAC address, and a connection-status screen showing ESP-NOW LINK, j4_stepper_neck, j4_stepper_eyes, j4_talk, and j4_display as CONNECTED (green) / DISCONNECTED (red)
 - Sends a 49-byte binary status packet to the XIAO ESP32S3 display board at 25 fps over UART
 - Shows a STATUS line on the built-in TFT: "ONLINE" when the ESP-NOW link is up and the steppers are healthy, "OFFLINE" if no status packet arrives, or the reported stepper fault (e.g. "NL OT", "EYES OFFLINE"); green when healthy, red on any fault
 
