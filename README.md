@@ -18,6 +18,7 @@ Johnny 4 is a prop robot controlled wirelessly. This board is the handheld contr
 - Answers `LIST?` requests from the display board out of its cached copy, so a display reboot recovers the list without a full round trip
 - Displays live pot values, keypress state, and battery voltage on the built-in TFT
 - Sends a 49-byte binary status packet to the XIAO ESP32S3 display board at 25 fps over UART
+- Shows a STATUS line on the built-in TFT: "ONLINE" when the ESP-NOW link is up and the steppers are healthy, "OFFLINE" if no status packet arrives, or the reported stepper fault (e.g. "NL OT", "EYES OFFLINE"); green when healthy, red on any fault
 
 ## Hardware
 
@@ -70,7 +71,7 @@ The pots feed two ADS1115 modules over I2C. The eye controls reuse the channels 
 | ADS_02 (0x49) | A2 | Neck joystick X |
 | ADS_02 (0x49) | A3 | Neck joystick Y (jaw, feeds neck mixer) |
 
-eyes_x, eyes_y, and iris are sent to j4_receiver over ESP-NOW and drive servos on its PCA9685. eye-pop is sent on the same packet and is forwarded to j4_stepper, where it drives the eye-pop steppers with the neck's motion settings. The neck joystick still mixes into neck-L / neck-R as before.
+eyes_x, eyes_y, and iris are sent to j4_receiver over ESP-NOW and drive servos on its PCA9685. eye-pop is sent on the same packet and is forwarded down the stepper daisy chain (j4_stepper_neck to j4_stepper_eyes), where it drives the eye-pop steppers with the neck's motion settings. The neck joystick still mixes into neck-L / neck-R as before.
 
 ## Keypad wiring
 
@@ -127,3 +128,4 @@ The robot receiver's MAC address is set in `broadcastAddress[]` near the top of 
 ## Related projects
 
 - **[j4_display](https://github.com/kevinkevinlangelange/j4_display)** -- the XIAO ESP32S3 secondary display board that receives data from this controller
+- **[j4_receiver](https://github.com/kevinkevinlangelange/j4_receiver)** -- the robot-side TTGO that receives this controller's ESP-NOW packets and returns status

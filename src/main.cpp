@@ -9,6 +9,7 @@
 //     last updated:  2026-06-10 -- CDT
 //     last updated:  2026-06-15 -- CDT
 //     last updated:  2026-06-16 -- CDT
+//     last updated:  2026-06-17 -- CDT
 //
 //
 //           author:  Kevin Lange
@@ -39,6 +40,13 @@
 //                            left_arm/right_arm. Neck joystick, volume, and the
 //                            jukebox are unchanged. disp_pkt_t to j4_display keeps
 //                            its layout (the new controls reuse the old slots).
+//                  v0_6_9 -- Added a STATUS line to the TFT. The ESP-NOW status
+//                            packet now carries a stepper_status field (from
+//                            j4_stepper_neck via j4_receiver). Shows "ONLINE" when
+//                            the link is up and all drivers are healthy, "OFFLINE"
+//                            if no status packet arrives, or the reported fault
+//                            (e.g. "NL OT", "EYES OFFLINE"). Green when healthy,
+//                            red otherwise.
 //
 //
 //
@@ -197,6 +205,7 @@ typedef struct __attribute__((packed)) struct_message_rcv {
   char    phrase_playing_rcv[32];
   int16_t battery_02_voltage_rcv;
   int16_t battery_03_voltage_rcv;
+  char    stepper_status_rcv[24];    // from j4_stepper_neck via j4_receiver
 } struct_message_rcv;
 
 struct_message_rcv rcvData;
@@ -219,6 +228,11 @@ esp_now_peer_info_t peerInfo;
 
 volatile bool connectError = LOW;
 String connectStatus = "NO INFO";
+
+// Status line: tracks the last status packet from j4_receiver. If none arrives
+// within the timeout, the ESP-NOW link is treated as down ("OFFLINE").
+unsigned long lastStatusRecvMs = 0;
+#define STATUS_LINK_TIMEOUT_MS  1500
 // --- END ESP-NOW RELATED ---
 
 // --- JUKEBOX FILE LIST ---
@@ -557,6 +571,7 @@ void OnDataRecv(const uint8_t *mac, const uint8_t *incomingData, int len) {
 
   } else if (pkt_type == ESPNOW_PKT_STATUS && len == sizeof(struct_message_rcv)) {
     memcpy(&rcvData, incomingData, sizeof(rcvData));
+    lastStatusRecvMs = millis();
   }
 }
 // --- END ESP-NOW RELATED ---
@@ -619,6 +634,16 @@ void labelsDisplaySprite() {
 }
 
 
+// Combined system status: OFFLINE if the receiver link is silent, otherwise
+// ONLINE, or whatever fault the stepper chain reported (e.g. "NL OT").
+String buildStatusLine() {
+  if (millis() - lastStatusRecvMs > STATUS_LINK_TIMEOUT_MS) return "OFFLINE";
+  String s = rcvData.stepper_status_rcv;
+  if (s.length() == 0 || s == "OK") return "ONLINE";
+  return s;
+}
+
+
 void dataDisplaySprite() {
   screen_bottom_sprite_203.setTextColor(TFT_GREEN);
   screen_bottom_sprite_203.fillRect(70, 40, 65, 140, TFT_BLACK);
@@ -635,6 +660,14 @@ void dataDisplaySprite() {
   screen_bottom_sprite_203.drawString(String(eyes_y_value),    70, 120, 2);
   screen_bottom_sprite_203.drawString(String(neck_left_value),  70, 140, 2);
   screen_bottom_sprite_203.drawString(String(neck_right_value), 70, 160, 2);
+
+  // System status line (green when healthy, red on any fault / link loss)
+  String st = buildStatusLine();
+  bool ok = (st == "ONLINE");
+  screen_bottom_sprite_203.fillRect(0, 182, 135, 18, TFT_BLACK);
+  screen_bottom_sprite_203.setTextColor(ok ? TFT_GREEN : TFT_RED);
+  screen_bottom_sprite_203.drawString("STATUS: " + st, 0, 182, 1);
+  screen_bottom_sprite_203.setTextColor(TFT_GREEN);
 }
 
 
