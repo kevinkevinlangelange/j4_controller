@@ -8,6 +8,7 @@
 //     last updated:  2026-06-07 -- CDT
 //     last updated:  2026-06-10 -- CDT
 //     last updated:  2026-06-15 -- CDT
+//     last updated:  2026-06-16 -- CDT
 //
 //
 //           author:  Kevin Lange
@@ -74,6 +75,21 @@
 //      TTGO GPIO17  →  XIAO D7 (GPIO44)    TTGO TX → XIAO RX
 //      TTGO GPIO27  ←  XIAO D6 (GPIO43)    TTGO RX ← XIAO TX
 //      TTGO GND     -  XIAO GND
+//      ------------------------------------------------------------------
+//
+//      ANALOG INPUTS  (pots wired to two ADS1115 ADCs on the I2C bus)
+//      ------------------------------------------------------------------
+//      ADS_01 (0x48) A0:  volume
+//      ADS_01 (0x48) A1:  iris   (100K linear pot)        -> iris servo
+//      ADS_01 (0x48) A2:  eye-pop (0-3200, like neck)     -> eye-pop steppers
+//      ADS_02 (0x49) A0:  eyes joystick X / eyes_x        -> eyes pan servo
+//      ADS_02 (0x49) A1:  eyes joystick Y / eyes_y        -> eyes tilt servo
+//      ADS_02 (0x49) A2:  neck joystick X
+//      ADS_02 (0x49) A3:  neck joystick Y (jaw)  -> mixed into neck-L / neck-R
+//
+//      iris / eyes_x / eyes_y / eye-pop and the mixed neck-L/neck-R are sent
+//      to j4_receiver over ESP-NOW. The receiver drives the eye servos on its
+//      PCA9685 and forwards neck + eye-pop to j4_stepper.
 //      ------------------------------------------------------------------
 //
 //
