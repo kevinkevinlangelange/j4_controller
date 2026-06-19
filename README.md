@@ -39,8 +39,9 @@ Johnny 4 is a prop robot controlled wirelessly. This board is the handheld contr
 | 17 | UART TX to XIAO display board |
 | 27 | UART RX from XIAO display board |
 | 34 | Battery voltage sense (ADC input, read-only) |
+| 35 | Screen-cycle button (TTGO built-in; data / MAC / connection status) |
 
-Potentiometer inputs are routed through the ADS1115 modules. GPIO 12 causes boot/flash issues when connected to a pot and is avoided. GPIO 17 is unreliable as an input and is used only as TX. Pins 36, 37, and 38 are input-only.
+GPIO 35 is the TTGO's on-board button, so it needs no wiring. Potentiometer inputs are routed through the ADS1115 modules. GPIO 12 causes boot/flash issues when connected to a pot and is avoided. GPIO 17 is unreliable as an input and is used only as TX. Pins 36, 37, and 38 are input-only.
 
 ## Pin diagram
 
@@ -50,8 +51,8 @@ Potentiometer inputs are routed through the ADS1115 modules. GPIO 12 causes boot
    I2C SDA <----->| 21    ADS1115 x2 (0x48/0x49)         |
    I2C SCL <----->| 22    PCF8574 keypad (0x20)          |
                   |                            [ ST7789 1.14" TFT ]
-   XIAO D7 RX <---| 17 (UART TX)                         |
-   XIAO D6 TX --->| 27 (UART RX)                  34 |<-- battery sense (ADC in)
+   XIAO D7 RX <---| 17 (UART TX)                  34 |<-- battery sense (ADC in)
+   XIAO D6 TX --->| 27 (UART RX)                  35 |<-- screen-cycle button
                   |              3V3   GND   USB         |
                   +--------------------------------------+
                           |
