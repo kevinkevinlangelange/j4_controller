@@ -45,19 +45,28 @@ GPIO 35 is the TTGO's on-board button, so it needs no wiring. Potentiometer inpu
 
 ## Pin diagram
 
+Physical layout, display facing you, USB-C on the RIGHT (matches your photo).
+Both header rows read left-to-right; `[ ]` marks the pins this board uses.
+
 ```
-                  TTGO T-Display v1.1 (ESP32)  -  j4_controller
-                  +--------------------------------------+
-   I2C SDA <----->| 21    ADS1115 x2 (0x48/0x49)         |
-   I2C SCL <----->| 22    PCF8574 keypad (0x20)          |
-                  |                            [ ST7789 1.14" TFT ]
-   XIAO D7 RX <---| 17 (UART TX)                  34 |<-- battery sense (ADC in)
-   XIAO D6 TX --->| 27 (UART RX)                  35 |<-- screen-cycle button
-                  |              3V3   GND   USB         |
-                  +--------------------------------------+
-                          |
-                          +-- ESP-NOW (wireless) <--> j4_receiver
+   top row:   36  37  38  39  32  33  25  26 [27] GND  5V
+            +-----------------------------------------------+
+            |                                     (o) BOOT  |
+            |                [ ST7789 TFT ]                 |= USB-C
+            |                                     (o) BTN35 |
+            +-----------------------------------------------+
+   bot row:  GND [21] [22] [17]  2  15  13  12  GND 3V3
+
+   used pins:
+     21  I2C SDA (ADS1115 x2 @ 0x48/0x49 + PCF8574 keypad @ 0x20)
+     22  I2C SCL
+     17  UART TX -> XIAO D7 (GPIO44)
+     27  UART RX <- XIAO D6 (GPIO43)
+   on-board (no header pin): GPIO34 = battery sense, BOOT = GPIO0,
+     BTN35 = GPIO35 (screen-cycle button), TFT on 4/5/16/18/19/23
 ```
+
+ESP-NOW (wireless) links this board to j4_receiver.
 
 ## Analog inputs (ADS1115)
 
