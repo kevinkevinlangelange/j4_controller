@@ -10,6 +10,7 @@
 //     last updated:  2026-06-15 -- CDT
 //     last updated:  2026-06-16 -- CDT
 //     last updated:  2026-06-17 -- CDT
+//     last updated:  2026-07-02 -- CDT
 //
 //
 //           author:  Kevin Lange
@@ -55,6 +56,12 @@
 //                            carries neck_ok/eyes_ok/talk_ok from the receiver, the
 //                            control packet carries display_ok, and j4_display +
 //                            j4_talk send a "PING" heartbeat so they can be seen.
+//                 v0_6_11 -- The stepper boards were consolidated: j4_stepper
+//                            (renamed from j4_stepper_neck) now drives all five
+//                            steppers and j4_stepper_eyes is retired. The status
+//                            packet's neck_ok/eyes_ok became a single stepper_ok
+//                            (matching j4_receiver v0_7r_12), and the connection
+//                            screen lists j4_stepper instead of the two boards.
 //
 //
 //
@@ -217,9 +224,8 @@ typedef struct __attribute__((packed)) struct_message_rcv {
   char    phrase_playing_rcv[32];
   int16_t battery_02_voltage_rcv;
   int16_t battery_03_voltage_rcv;
-  char    stepper_status_rcv[24];    // from j4_stepper_neck via j4_receiver
-  uint8_t neck_ok_rcv;               // 1 = j4_stepper_neck responding
-  uint8_t eyes_ok_rcv;               // 1 = j4_stepper_eyes responding
+  char    stepper_status_rcv[24];    // from j4_stepper via j4_receiver
+  uint8_t stepper_ok_rcv;            // 1 = j4_stepper responding
   uint8_t talk_ok_rcv;               // 1 = j4_talk (Teensy) responding
 } struct_message_rcv;
 
@@ -759,14 +765,12 @@ void drawConnLine(const char *name, bool ok, int row) {
 // Connection-status screen: how this controller sees each link right now.
 void connectionDisplay() {
   unsigned long now = millis();
-  bool espnow = (now - lastStatusRecvMs) < STATUS_LINK_TIMEOUT_MS;   // receiver link
-  bool dispOk = (now - lastDisplayMs)    < DISPLAY_TIMEOUT_MS;
-  bool neckOk = espnow && rcvData.neck_ok_rcv;                       // relayed by receiver
-  bool eyesOk = espnow && rcvData.eyes_ok_rcv;
-  bool talkOk = espnow && rcvData.talk_ok_rcv;
-  drawConnLine("ESP-NOW LINK",    espnow, 0);
-  drawConnLine("j4_stepper_neck", neckOk, 1);
-  drawConnLine("j4_stepper_eyes", eyesOk, 2);
-  drawConnLine("j4_talk",         talkOk, 3);
-  drawConnLine("j4_display",      dispOk, 4);
+  bool espnow    = (now - lastStatusRecvMs) < STATUS_LINK_TIMEOUT_MS;   // receiver link
+  bool dispOk    = (now - lastDisplayMs)    < DISPLAY_TIMEOUT_MS;
+  bool stepperOk = espnow && rcvData.stepper_ok_rcv;                    // relayed by receiver
+  bool talkOk    = espnow && rcvData.talk_ok_rcv;
+  drawConnLine("ESP-NOW LINK", espnow,    0);
+  drawConnLine("j4_stepper",   stepperOk, 1);
+  drawConnLine("j4_talk",      talkOk,    2);
+  drawConnLine("j4_display",   dispOk,    3);
 }
