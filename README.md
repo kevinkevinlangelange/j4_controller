@@ -50,27 +50,28 @@ GPIO 35 is the TTGO's on-board button, so it needs no wiring. Potentiometer inpu
 ## Pin diagram
 
 Physical layout, display facing AWAY from you (rails visible), USB-C at the
-bottom. The two header rails read top-to-bottom as shown.
+TOP (matching how the board is mounted). The two header rails read
+top-to-bottom as shown.
 
 ```
-          LEFT rail                                 RIGHT rail
-                          +--------------+
-    (input only) -- 36 |  |              |  | GND   ground
-    (input only) -- 37 |  |              |  | 5V
-    (input only) -- 38 |  |    TTGO      |  | 3V3
-    (input only) -- 39 |  |  T-Display   |  | GND   ground
-          (free) -- 32 |  |    v1.1      |  | 12    (avoid: boot/flash issues)
-          (free) -- 33 |  |              |  | 13    (free)
- DISP-R TX (rsv) -- 25 |  |  [ ST7789    |  | 15    (free)
-DISP-R RX <-XIAO -- 26 |  |    TFT on    |  | 2     (free)
-DISP-L RX <-XIAO -- 27 |  |    back ]    |  | 17    DISP-L TX -> XIAO D7
-          ground -- GND|  |              |  | 22    I2C SCL
-              5V -- 5V |  |              |  | 21    I2C SDA (ADS x2 + keypad)
-                          +---[ USB-C ]--+
+            LEFT rail                            RIGHT rail
+                                +--[ USB-C ]--+
+I2C SDA (ADS x2 + keypad) -- 21 |             |  5V
+                  I2C SCL -- 22 |             |  GND  ground
+     DISP-L TX -> XIAO D7 -- 17 |     TTGO    |  27   DISP-L RX <- XIAO D6
+                   (free) -- 2  |  T-Display  |  26   DISP-R RX <- XIAO D6
+                   (free) -- 15 |     v1.1    |  25   DISP-R TX (reserved)
+                   (free) -- 13 |             |  33   (free)
+      (avoid: boot/flash) -- 12 |   [ ST7789  |  32   (free)
+                   ground -- GND|    TFT on   |  39   (input only)
+                     3.3V -- 3V3|    back ]   |  38   (input only)
+                       5V -- 5V |             |  37   (input only)
+                   ground -- GND|             |  36   (input only)
+                                +-------------+
 
    on-board (no header pin): GPIO34 = battery sense, BOOT = GPIO0,
-     GPIO35 = screen-cycle button, TFT on 4/5/16/18/19/23
-   I2C bus: ADS_01 @ 0x48, ADS_02 @ 0x49, PCF8574 keypad @ 0x20
+       GPIO35 = screen-cycle button, TFT on 4/5/16/18/19/23
+     I2C bus: ADS_01 @ 0x48, ADS_02 @ 0x49, PCF8574 keypad @ 0x20
 ```
 
 ESP-NOW (wireless) links this board to j4_receiver.
