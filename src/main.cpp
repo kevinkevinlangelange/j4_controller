@@ -62,6 +62,17 @@
 //                            packet's neck_ok/eyes_ok became a single stepper_ok
 //                            (matching j4_receiver v0_7r_12), and the connection
 //                            screen lists j4_stepper instead of the two boards.
+//                 v0_6_12 -- Second XIAO display board: j4_display_right (the old
+//                            j4_display is renamed j4_display_left). It carries
+//                            its own ADS1115 reading the four top-right pots and
+//                            streams raw counts here over Serial2 (TX 25 / RX 26)
+//                            as "P:<iris>,<color>,<brightness>,<volume>" at 25Hz.
+//                            iris and volume now come from that feed (freeing
+//                            ADS_01 A0/A1 for future pots), and two new controls
+//                            ride the ESP-NOW control packet: color + brightness
+//                            for the WS2812B strip on j4_receiver. display_ok
+//                            split into display_l_ok / display_r_ok; the conn
+//                            screen shows both displays.
 //
 //
 //
@@ -76,7 +87,7 @@
 //        4:  TFT backlight        [USED BY TTGO]
 //        5:  TFT CS               [USED BY TTGO]
 //       16:  TFT DC               [USED BY TTGO]
-//       17:  XIAO LINK TX  →  XIAO D7 / GPIO44   (output only; unreliable as input per README)
+//       17:  DISPLAY-L TX  →  left XIAO D7 / GPIO44   (Serial1)
 //       18:  TFT SCLK             [USED BY TTGO]
 //       19:  TFT MOSI             [USED BY TTGO]
 //
@@ -85,7 +96,9 @@
 //
 //       23:  TFT RST              [USED BY TTGO]
 //
-//       27:  XIAO LINK RX  ←  XIAO D6 / GPIO43
+//       25:  DISPLAY-R TX  →  right XIAO D7 / GPIO44  (Serial2, reserved)
+//       26:  DISPLAY-R RX  ←  right XIAO D6 / GPIO43  (Serial2, pot feed)
+//       27:  DISPLAY-L RX  ←  left XIAO D6 / GPIO43   (Serial1)
 //
 //       34:  battery voltage sense
 //
@@ -95,24 +108,35 @@
 //
 //      XIAO LINK WIRING  (3.3V logic on both sides - no level shifter needed)
 //      ------------------------------------------------------------------
-//      TTGO GPIO17  →  XIAO D7 (GPIO44)    TTGO TX → XIAO RX
-//      TTGO GPIO27  ←  XIAO D6 (GPIO43)    TTGO RX ← XIAO TX
-//      TTGO GND     -  XIAO GND
+//      j4_display_left  (Serial1):
+//        TTGO GPIO17  →  XIAO D7 (GPIO44)    TTGO TX → XIAO RX
+//        TTGO GPIO27  ←  XIAO D6 (GPIO43)    TTGO RX ← XIAO TX
+//      j4_display_right (Serial2):
+//        TTGO GPIO25  →  XIAO D7 (GPIO44)    TTGO TX → XIAO RX (reserved)
+//        TTGO GPIO26  ←  XIAO D6 (GPIO43)    TTGO RX ← XIAO TX (pot feed)
+//      TTGO GND  -  both XIAO GNDs
 //      ------------------------------------------------------------------
 //
-//      ANALOG INPUTS  (pots wired to two ADS1115 ADCs on the I2C bus)
+//      ANALOG INPUTS
 //      ------------------------------------------------------------------
-//      ADS_01 (0x48) A0:  volume
-//      ADS_01 (0x48) A1:  iris   (100K linear pot)        -> iris servo
+//      Local, on the two ADS1115 ADCs (I2C):
+//      ADS_01 (0x48) A0:  (free -- was volume, now on j4_display_right)
+//      ADS_01 (0x48) A1:  (free -- was iris,   now on j4_display_right)
 //      ADS_01 (0x48) A2:  eye-pop (0-3200, like neck)     -> eye-pop steppers
 //      ADS_02 (0x49) A0:  eyes joystick X / eyes_x        -> eyes pan servo
 //      ADS_02 (0x49) A1:  eyes joystick Y / eyes_y        -> eyes tilt servo
 //      ADS_02 (0x49) A2:  neck joystick X
 //      ADS_02 (0x49) A3:  neck joystick Y (jaw)  -> mixed into neck-L / neck-R
 //
-//      iris / eyes_x / eyes_y / eye-pop and the mixed neck-L/neck-R are sent
-//      to j4_receiver over ESP-NOW. The receiver drives the eye servos on its
-//      PCA9685 and forwards neck + eye-pop to j4_stepper.
+//      Remote, from j4_display_right's ADS1115 over Serial2 ("P:" lines):
+//        iris        -> iris servo (PCA9685 on j4_receiver)
+//        color       -> WS2812B strip color   (j4_receiver)
+//        brightness  -> WS2812B strip brightness (j4_receiver)
+//        volume      -> j4_talk audio volume
+//
+//      Everything is sent to j4_receiver over ESP-NOW. The receiver drives
+//      the eye servos + LED strip, forwards neck + eye-pop to j4_stepper,
+//      and relays volume to j4_talk.
 //      ------------------------------------------------------------------
 //
 //
@@ -148,9 +172,11 @@ void sendFileListToXIAO();
 #define SDA 21
 #define SCL 22
 
-// --- XIAO LINK ---
-#define XIAO_TX_PIN  17   // GPIO17 output → XIAO D7 (GPIO44)
-#define XIAO_RX_PIN  27   // GPIO27 input  ← XIAO D6 (GPIO43)
+// --- XIAO LINKS ---
+#define XIAO_TX_PIN  17    // Serial1: GPIO17 output → left XIAO D7 (GPIO44)
+#define XIAO_RX_PIN  27    // Serial1: GPIO27 input  ← left XIAO D6 (GPIO43)
+#define XIAOR_TX_PIN 25    // Serial2: GPIO25 output → right XIAO D7 (reserved)
+#define XIAOR_RX_PIN 26    // Serial2: GPIO26 input  ← right XIAO D6 (pot feed)
 #define XIAO_BAUD    115200
 #define JOYSTICK_DEAD_ZONE 200  // counts either side of 1600 to snap to center (scaled for 0-3200 range)
 
@@ -235,14 +261,17 @@ typedef struct __attribute__((packed)) struct_message_xmit {
   uint8_t pkt_type;                  // ESPNOW_PKT_CONTROL
   char    phrase_select_xmit[8];
   int16_t volume_xmit;
-  int16_t iris_xmit;                 // 270-deg iris servo (was eyes pot)
-  int16_t eyes_x_xmit;               // eyes joystick X -> eyes_x servo (was left_arm pot)
-  int16_t eyes_y_xmit;               // eyes joystick Y -> eyes_y servo (was right_arm pot)
-  int16_t eye_pop_xmit;              // eye-pop steppers, 0-3200 like neck (was spot pot)
+  int16_t iris_xmit;                 // 270-deg iris servo (pot on j4_display_right)
+  int16_t color_xmit;                // WS2812B strip color, 0-255 (j4_display_right)
+  int16_t brightness_xmit;           // WS2812B strip brightness, 0-255 (j4_display_right)
+  int16_t eyes_x_xmit;               // eyes joystick X -> eyes_x servo
+  int16_t eyes_y_xmit;               // eyes joystick Y -> eyes_y servo
+  int16_t eye_pop_xmit;              // eye-pop steppers, 0-3200 like neck
   int16_t neck_left_xmit;
   int16_t neck_right_xmit;
   uint8_t need_filelist_xmit;        // 1 = still waiting on the file list
-  uint8_t display_ok_xmit;           // 1 = controller sees j4_display heartbeat
+  uint8_t display_l_ok_xmit;         // 1 = controller sees j4_display_left heartbeat
+  uint8_t display_r_ok_xmit;         // 1 = controller sees j4_display_right pot feed
 } struct_message_xmit;
 
 struct_message_xmit xmitData;
@@ -256,8 +285,10 @@ String connectStatus = "NO INFO";
 unsigned long lastStatusRecvMs = 0;
 #define STATUS_LINK_TIMEOUT_MS  1500
 
-// j4_display heartbeat ("PING" or any line on the XIAO link)
+// j4_display_left heartbeat ("PING" or any line on the Serial1 link)
 unsigned long lastDisplayMs = 0;
+// j4_display_right heartbeat (its 25Hz "P:" pot lines on the Serial2 link)
+unsigned long lastDisplayRMs = 0;
 #define DISPLAY_TIMEOUT_MS  3000
 
 // Screen cycling via the TTGO's built-in button on GPIO 35 (same as j4_receiver).
@@ -279,8 +310,10 @@ String         xiaoSerialBuf      = "";
 
 
 // Potentiometer values
-int volume_value    = 0;
-int iris_value      = 0;   // iris 100K linear pot (was eyes pot)
+int volume_value    = 0;   // from j4_display_right (was ADS_01 A0)
+int iris_value      = 0;   // from j4_display_right (was ADS_01 A1)
+int color_value     = 0;   // from j4_display_right -> WS2812B color
+int brightness_value = 0;  // from j4_display_right -> WS2812B brightness
 int eyes_x_value    = 0;   // eyes joystick X (was left-arm pot)
 int eyes_y_value    = 0;   // eyes joystick Y (was right-arm pot)
 int eye_pop_value   = 0;   // eye-pop steppers, 0-3200 (was spot pot)
@@ -288,6 +321,14 @@ int neck_value       = 0;  // joystick X-axis raw
 int jaw_value        = 0;  // joystick Y-axis raw
 int neck_left_value  = 0;
 int neck_right_value = 0;
+
+// Raw ADS1115 counts streamed from j4_display_right's "P:" lines. Held raw so
+// the same processPot() scaling applies as for the local ADS channels.
+int dispR_iris_raw       = 0;
+int dispR_color_raw      = 0;
+int dispR_brightness_raw = 0;
+int dispR_volume_raw     = 0;
+String xiaoRSerialBuf    = "";
 
 // Controller battery (millivolts), updated by battery timer, read by sendToXIAO()
 uint16_t bat1_mv = 0;
@@ -371,8 +412,9 @@ void setup() {
   ADS_02.setMode(1);
   ADS_02.requestADC(0);
 
-  // XIAO display link - init after ADS1115 to avoid I2C/UART peripheral conflict
-  Serial1.begin(XIAO_BAUD, SERIAL_8N1, XIAO_RX_PIN, XIAO_TX_PIN);
+  // XIAO display links - init after ADS1115 to avoid I2C/UART peripheral conflict
+  Serial1.begin(XIAO_BAUD, SERIAL_8N1, XIAO_RX_PIN,  XIAO_TX_PIN);    // j4_display_left
+  Serial2.begin(XIAO_BAUD, SERIAL_8N1, XIAOR_RX_PIN, XIAOR_TX_PIN);   // j4_display_right
 
   WiFi.mode(WIFI_STA);
   Serial.println("MAC Address: ");
@@ -443,14 +485,38 @@ void loop() {
     }
   }
 
+  // j4_display_right: "P:<iris>,<color>,<brightness>,<volume>" pot feed (raw
+  // ADS1115 counts from its dedicated ADS1115). Any valid line = board alive.
+  while (Serial2.available()) {
+    char c = (char)Serial2.read();
+    if (c == '\n') {
+      int i, col, b, v;
+      if (sscanf(xiaoRSerialBuf.c_str(), "P:%d,%d,%d,%d", &i, &col, &b, &v) == 4) {
+        dispR_iris_raw       = i;
+        dispR_color_raw      = col;
+        dispR_brightness_raw = b;
+        dispR_volume_raw     = v;
+        lastDisplayRMs = millis();
+      }
+      xiaoRSerialBuf = "";
+    } else if (c != '\r') {
+      if (xiaoRSerialBuf.length() > 40) xiaoRSerialBuf = "";  // line noise guard
+      xiaoRSerialBuf += c;
+    }
+  }
+
   // --- ADC READS ---
-  volume_value    = processPot(ADS_01.readADC(0), 100);
-  iris_value      = processPot(ADS_01.readADC(1), 255);   // was eyes pot
+  // ADS_01 A0/A1 are free (volume + iris moved to j4_display_right's ADS1115).
   eye_pop_value   = processPot(ADS_01.readADC(2), 3200);  // eye-pop, 0-3200 like neck (was spot pot)
   eyes_x_value    = processPot(ADS_02.readADC(0), 255);   // eyes joystick X (was left-arm pot)
   eyes_y_value    = processPot(ADS_02.readADC(1), 255);   // eyes joystick Y (was right-arm pot)
   neck_value      = processPot(ADS_02.readADC(2), 3200);  // joystick X
   jaw_value       = processPot(ADS_02.readADC(3), 3200);  // joystick Y
+  // Remote pots from j4_display_right (same raw scale -> same processPot)
+  iris_value       = processPot(dispR_iris_raw, 255);
+  color_value      = processPot(dispR_color_raw, 255);
+  brightness_value = processPot(dispR_brightness_raw, 255);
+  volume_value     = processPot(dispR_volume_raw, 100);
   // --- END ADC READS ---
 
   // Dead zone: snap joystick axes to center if within threshold
@@ -463,13 +529,16 @@ void loop() {
 
   xmitData.volume_xmit      = volume_value;
   xmitData.iris_xmit        = iris_value;
+  xmitData.color_xmit       = color_value;
+  xmitData.brightness_xmit  = brightness_value;
   xmitData.eyes_x_xmit      = eyes_x_value;
   xmitData.eyes_y_xmit      = eyes_y_value;
   xmitData.eye_pop_xmit     = eye_pop_value;
   xmitData.neck_left_xmit   = neck_left_value;
   xmitData.neck_right_xmit  = neck_right_value;
   xmitData.need_filelist_xmit = jukeboxReady ? 0 : 1;
-  xmitData.display_ok_xmit    = (millis() - lastDisplayMs < DISPLAY_TIMEOUT_MS) ? 1 : 0;
+  xmitData.display_l_ok_xmit  = (millis() - lastDisplayMs  < DISPLAY_TIMEOUT_MS) ? 1 : 0;
+  xmitData.display_r_ok_xmit  = (millis() - lastDisplayRMs < DISPLAY_TIMEOUT_MS) ? 1 : 0;
 
   // --- BATTERY RELATED ---
   if (currentMillis - battery_01_previousMillis >= battery_01_interval) {
@@ -766,11 +835,13 @@ void drawConnLine(const char *name, bool ok, int row) {
 void connectionDisplay() {
   unsigned long now = millis();
   bool espnow    = (now - lastStatusRecvMs) < STATUS_LINK_TIMEOUT_MS;   // receiver link
-  bool dispOk    = (now - lastDisplayMs)    < DISPLAY_TIMEOUT_MS;
+  bool dispLOk   = (now - lastDisplayMs)    < DISPLAY_TIMEOUT_MS;
+  bool dispROk   = (now - lastDisplayRMs)   < DISPLAY_TIMEOUT_MS;
   bool stepperOk = espnow && rcvData.stepper_ok_rcv;                    // relayed by receiver
   bool talkOk    = espnow && rcvData.talk_ok_rcv;
-  drawConnLine("ESP-NOW LINK", espnow,    0);
-  drawConnLine("j4_stepper",   stepperOk, 1);
-  drawConnLine("j4_talk",      talkOk,    2);
-  drawConnLine("j4_display",   dispOk,    3);
+  drawConnLine("ESP-NOW LINK",     espnow,    0);
+  drawConnLine("j4_stepper",       stepperOk, 1);
+  drawConnLine("j4_talk",          talkOk,    2);
+  drawConnLine("j4_display_left",  dispLOk,   3);
+  drawConnLine("j4_display_right", dispROk,   4);
 }
