@@ -63,6 +63,13 @@
 //                            packet's neck_ok/eyes_ok became a single stepper_ok
 //                            (matching j4_receiver v0_7r_12), and the connection
 //                            screen lists j4_stepper instead of the two boards.
+//                 v0_6_14 -- RF hardening for crowded venues (Open Sauce prep),
+//                            matching j4_receiver v0_7r_15: ESP-NOW now runs on
+//                            the ESP32 long-range (LR) PHY (~4dB more sensitive;
+//                            ordinary WiFi gear cannot decode it -- both ends
+//                            must be ESP32s in LR mode), TX power maxed at
+//                            19.5dBm, and OnDataRecv drops any packet whose
+//                            sender MAC is not our receiver.
 //                 v0_6_13 -- The stepper boards split back into j4_stepper_neck +
 //                            j4_stepper_eyes (per-endpoint limit switches needed
 //                            the extra pins). Restored the eyes_ok field in the
@@ -158,6 +165,7 @@
 #include <SPI.h>
 #include <Arduino.h>
 #include <esp_now.h>
+#include <esp_wifi.h>
 #include <WiFi.h>
 #include "kevco_labs_logo_02.h" // 135 x 37 pixels
 
@@ -429,6 +437,13 @@ void setup() {
   Serial.println(WiFi.macAddress());
   WiFi.setSleep(false);
 
+  // RF hardening for crowded 2.4GHz venues (must match j4_receiver):
+  // LR = Espressif's proprietary long-range PHY. Both ends are ESP32s, so the
+  // link gains ~4dB sensitivity and ordinary WiFi gear cannot even decode it.
+  // Max TX power = 19.5dBm (units of 0.25dBm).
+  esp_wifi_set_protocol(WIFI_IF_STA, WIFI_PROTOCOL_LR);
+  esp_wifi_set_max_tx_power(78);
+
   if (esp_now_init() != ESP_OK) {
     connectStatus = "init error";
     connectError = HIGH;
@@ -652,6 +667,9 @@ void OnDataSent(const uint8_t *mac_addr, esp_now_send_status_t status) {
 }
 
 void OnDataRecv(const uint8_t *mac, const uint8_t *incomingData, int len) {
+  // Only accept packets from our receiver -- at a crowded event another
+  // ESP-NOW project's broadcast could otherwise be mistaken for ours.
+  if (memcmp(mac, broadcastAddress, 6) != 0) return;
   if (len < 1) return;
 
   uint8_t pkt_type = incomingData[0];
