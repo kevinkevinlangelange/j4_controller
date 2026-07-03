@@ -63,19 +63,6 @@
 //                            packet's neck_ok/eyes_ok became a single stepper_ok
 //                            (matching j4_receiver v0_7r_12), and the connection
 //                            screen lists j4_stepper instead of the two boards.
-//                 v0_6_14 -- RF hardening for crowded venues (Open Sauce prep),
-//                            matching j4_receiver v0_7r_15: ESP-NOW now runs on
-//                            the ESP32 long-range (LR) PHY (~4dB more sensitive;
-//                            ordinary WiFi gear cannot decode it -- both ends
-//                            must be ESP32s in LR mode), TX power maxed at
-//                            19.5dBm, and OnDataRecv drops any packet whose
-//                            sender MAC is not our receiver.
-//                 v0_6_13 -- The stepper boards split back into j4_stepper_neck +
-//                            j4_stepper_eyes (per-endpoint limit switches needed
-//                            the extra pins). Restored the eyes_ok field in the
-//                            ESP-NOW status packet (matching j4_receiver
-//                            v0_7r_14) and the j4_stepper_eyes row on the
-//                            connection screen.
 //                 v0_6_12 -- Second XIAO display board: j4_display_right (the old
 //                            j4_display is renamed j4_display_left). It carries
 //                            its own ADS1115 reading the four top-right pots and
@@ -87,6 +74,21 @@
 //                            for the WS2812B strip on j4_receiver. display_ok
 //                            split into display_l_ok / display_r_ok; the conn
 //                            screen shows both displays.
+//                 v0_6_13 -- The stepper boards split back into j4_stepper_neck +
+//                            j4_stepper_eyes (per-endpoint limit switches needed
+//                            the extra pins). Restored the eyes_ok field in the
+//                            ESP-NOW status packet (matching j4_receiver
+//                            v0_7r_14) and the j4_stepper_eyes row on the
+//                            connection screen.
+//                 v0_6_14 -- RF hardening for crowded venues (Open Sauce prep),
+//                            matching j4_receiver v0_7r_15: ESP-NOW now runs on
+//                            the ESP32 long-range (LR) PHY (~4dB more sensitive;
+//                            ordinary WiFi gear cannot decode it -- both ends
+//                            must be ESP32s in LR mode), TX power maxed at
+//                            19.5dBm, and OnDataRecv drops any packet whose
+//                            sender MAC is not our receiver. ESP-NOW channel
+//                            pinned to 6 (ESPNOW_CHANNEL) to dodge other ESP-NOW
+//                            projects on the default channel 1.
 //
 //
 //
@@ -256,6 +258,10 @@ ADS1115 ADS_02(0x49);  // ADDRESS PIN TO VDD
 
 // --- ESP-NOW RELATED ---
 uint8_t broadcastAddress[] = { 0xA0, 0xDD, 0x6C, 0x74, 0xDA, 0x74 };  //MAY 2026 TTGO 2026-05-01--1238-KL
+
+// ESP-NOW WiFi channel -- MUST match j4_receiver. 6 avoids the ESP32 power-on
+// default (1) that every unconfigured ESP-NOW project sits on. Use 1/6/11 only.
+#define ESPNOW_CHANNEL 6
 
 // Both ends must keep these structs identical to the ones in j4_receiver.
 // Packed with fixed-size char arrays -- no String members, they don't survive
@@ -441,8 +447,12 @@ void setup() {
   // LR = Espressif's proprietary long-range PHY. Both ends are ESP32s, so the
   // link gains ~4dB sensitivity and ordinary WiFi gear cannot even decode it.
   // Max TX power = 19.5dBm (units of 0.25dBm).
+  // Channel 6 (not the power-on default of 1) dodges every other ESP-NOW
+  // project left on its default channel. Both ends must match; if the venue
+  // is ugly on 6, change ESPNOW_CHANNEL on BOTH boards (1/6/11 only) + reflash.
   esp_wifi_set_protocol(WIFI_IF_STA, WIFI_PROTOCOL_LR);
   esp_wifi_set_max_tx_power(78);
+  esp_wifi_set_channel(ESPNOW_CHANNEL, WIFI_SECOND_CHAN_NONE);
 
   if (esp_now_init() != ESP_OK) {
     connectStatus = "init error";
