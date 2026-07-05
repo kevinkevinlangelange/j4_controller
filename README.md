@@ -8,7 +8,8 @@ Johnny 4 is a prop robot controlled wirelessly. This board is the handheld contr
 
 ## What this firmware does
 
-- Reads analog potentiometers via two local ADS1115 ADC modules: eye-pop, an eyes joystick (eyes_x / eyes_y), and the neck joystick (neck X / jaw Y)
+- Reads analog potentiometers via four local ADS1115 ADC modules: the eyes joystick (eyes_x / eyes_y), the neck joystick (neck X / jaw Y), and the eight middle face pots (Eyebrow L/R, Basket Eyebrow L/R, Nose, Nose Basket, Bottom Eyelid L/R); the fourth module's channels are spares for future pots (neck-pivot etc.)
+- Reads the four panel toggle switches (LASER, VENT, EYE POP, and the AUX toggle by the right joystick) on GPIOs 32/33/13/15 with internal pull-ups
 - Ingests four more pots (iris, color, brightness, volume) from [j4_display_right](https://github.com/kevinkevinlangelange/j4_display_right)'s dedicated ADS1115 over Serial2 as 25 Hz `P:` lines
 - Reads a 4x4 matrix keypad via PCF8574 I2C expander using a custom scan routine
 - Supports jukebox-style audio phrase selection: press a letter (A-D) then a digit (0-9) to queue a phrase, or press a digit alone to queue a 0x phrase (e.g. pressing 8 queues "08.wav")
@@ -27,7 +28,8 @@ Johnny 4 is a prop robot controlled wirelessly. This board is the handheld contr
 | Component | Details |
 |-----------|---------|
 | Microcontroller | LILYGO TTGO T-Display v1.1 (ESP32 with built-in 1.14" ST7789 TFT) |
-| ADC modules | Two ADS1115 (I2C addresses 0x48 and 0x49); a third lives on j4_display_right |
+| ADC modules | Four ADS1115 (I2C addresses 0x48, 0x49, 0x4A, 0x4B); a fifth lives on j4_display_right |
+| Toggle switches | LASER, VENT, EYE POP, AUX -- GPIOs 32/33/13/15, INPUT_PULLUP, switch closes to GND |
 | Keypad expander | PCF8574 I2C I/O expander (address 0x20) |
 | Keypad | 4x4 matrix keypad, headers soldered directly into P0-P7 |
 | Displays | j4_display_left (jukebox, Serial1) + j4_display_right (pot labels, Serial2) |
@@ -36,16 +38,20 @@ Johnny 4 is a prop robot controlled wirelessly. This board is the handheld contr
 
 | GPIO | Function |
 |------|----------|
-| 21 | I2C SDA (ADS1115 x2, PCF8574 keypad) |
+| 21 | I2C SDA (ADS1115 x4, PCF8574 keypad) |
 | 22 | I2C SCL |
 | 17 | Serial1 TX to j4_display_left (XIAO D7) |
 | 27 | Serial1 RX from j4_display_left (XIAO D6) |
 | 25 | Serial2 TX to j4_display_right (XIAO D7, reserved) |
 | 26 | Serial2 RX from j4_display_right (XIAO D6, pot feed) |
+| 32 | LASER toggle (INPUT_PULLUP, switch closes to GND) |
+| 33 | VENT toggle (INPUT_PULLUP, switch closes to GND) |
+| 13 | EYE POP toggle (INPUT_PULLUP, switch closes to GND) |
+| 15 | AUX toggle, next to the right joystick (INPUT_PULLUP, unassigned) |
 | 34 | Battery voltage sense (ADC input, read-only) |
 | 35 | Screen-cycle button (TTGO built-in; data / MAC / connection status) |
 
-GPIO 35 is the TTGO's on-board button, so it needs no wiring. Potentiometer inputs are routed through the ADS1115 modules. GPIO 12 causes boot/flash issues when connected to a pot and is avoided. GPIO 17 is unreliable as an input and is used only as TX. Pins 36, 37, and 38 are input-only.
+GPIO 35 is the TTGO's on-board button, so it needs no wiring. Potentiometer inputs are routed through the ADS1115 modules. GPIO 12 causes boot/flash issues when connected to a pot and is avoided. GPIO 17 is unreliable as an input and is used only as TX. Pins 36, 37, and 38 are input-only. The four toggles use the internal pull-ups, so each switch just shorts its GPIO to GND when flipped ON -- no external resistors.
 
 ## Pin diagram
 
@@ -56,13 +62,13 @@ top-to-bottom as shown.
 ```
             LEFT rail                            RIGHT rail
                                 +--[ USB-C ]--+
-I2C SDA (ADS x2 + keypad) -- 21 |             |  5V
+I2C SDA (ADS x4 + keypad) -- 21 |             |  5V
                   I2C SCL -- 22 |             |  GND  ground
      DISP-L TX -> XIAO D7 -- 17 |     TTGO    |  27   DISP-L RX <- XIAO D6
                    (free) -- 2  |  T-Display  |  26   DISP-R RX <- XIAO D6
-                   (free) -- 15 |     v1.1    |  25   DISP-R TX (reserved)
-                   (free) -- 13 |             |  33   (free)
-      (avoid: boot/flash) -- 12 |   [ ST7789  |  32   (free)
+               AUX toggle -- 15 |     v1.1    |  25   DISP-R TX (reserved)
+           EYE POP toggle -- 13 |             |  33   VENT toggle
+      (avoid: boot/flash) -- 12 |   [ ST7789  |  32   LASER toggle
                    ground -- GND|    TFT on   |  39   (input only)
                      3.3V -- 3V3|    back ]   |  38   (input only)
                        5V -- 5V |             |  37   (input only)
@@ -71,24 +77,34 @@ I2C SDA (ADS x2 + keypad) -- 21 |             |  5V
 
    on-board (no header pin): GPIO34 = battery sense, BOOT = GPIO0,
        GPIO35 = screen-cycle button, TFT on 4/5/16/18/19/23
-     I2C bus: ADS_01 @ 0x48, ADS_02 @ 0x49, PCF8574 keypad @ 0x20
+     I2C bus: ADS_01 @ 0x48, ADS_02 @ 0x49, ADS_03 @ 0x4A,
+       ADS_04 @ 0x4B, PCF8574 keypad @ 0x20
+     toggles: INPUT_PULLUP, switch closes to GND (ON = LOW)
 ```
 
 ESP-NOW (wireless) links this board to j4_receiver.
 
 ## Analog inputs
 
-Local, on the two ADS1115 modules over I2C:
+Local, on the four ADS1115 modules over I2C:
 
 | Module | Channel | Control |
 |--------|---------|---------|
-| ADS_01 (0x48) | A0 | (free -- was volume, moved to j4_display_right) |
-| ADS_01 (0x48) | A1 | (free -- was iris, moved to j4_display_right) |
-| ADS_01 (0x48) | A2 | Eye-pop (0-3200, was spot) |
+| ADS_01 (0x48) | A0 | Eyebrow L pot |
+| ADS_01 (0x48) | A1 | Eyebrow R pot |
+| ADS_01 (0x48) | A2 | Basket Eyebrow L pot (was eye-pop, now a toggle) |
+| ADS_01 (0x48) | A3 | Basket Eyebrow R pot |
 | ADS_02 (0x49) | A0 | Eyes joystick X / eyes_x (was left arm) |
 | ADS_02 (0x49) | A1 | Eyes joystick Y / eyes_y (was right arm) |
 | ADS_02 (0x49) | A2 | Neck joystick X |
 | ADS_02 (0x49) | A3 | Neck joystick Y (jaw, feeds neck mixer) |
+| ADS_03 (0x4A) | A0 | Nose pot (up/down) |
+| ADS_03 (0x4A) | A1 | Nose Basket pot (up/down) |
+| ADS_03 (0x4A) | A2 | Bottom Eyelid L pot |
+| ADS_03 (0x4A) | A3 | Bottom Eyelid R pot |
+| ADS_04 (0x4B) | A0-A3 | Free (future pots: neck-pivot, spares) |
+
+The eight face pots ride the ESP-NOW control packet to PCA9685 channels 6-13 on j4_receiver (Eyebrow L/R = ch 6/7, Basket Eyebrow L/R = ch 8/9, Nose = ch 10, Nose Basket = ch 11, Bottom Eyelid L/R = ch 12/13).
 
 Remote, streamed from j4_display_right's dedicated ADS1115 (raw counts over Serial2, scaled here with the same `processPot()`):
 
@@ -99,7 +115,18 @@ Remote, streamed from j4_display_right's dedicated ADS1115 (raw counts over Seri
 | A2 | Brightness | WS2812B strip brightness (j4_receiver) |
 | A3 | Volume | j4_talk audio volume |
 
-eyes_x, eyes_y, and iris drive servos on the receiver's PCA9685. eye-pop is forwarded down the stepper chain (j4_stepper_neck to j4_stepper_eyes), where it drives the eye-pop steppers with the neck's motion settings. The neck joystick mixes into neck-L / neck-R as before. color and brightness drive the receiver's WS2812B strip.
+eyes_x, eyes_y, and iris drive servos on the receiver's PCA9685. The neck joystick mixes into neck-L / neck-R as before. color and brightness drive the receiver's WS2812B strip.
+
+## Toggle switches
+
+Four panel toggles, each wired between its GPIO and GND (internal pull-up, ON = LOW). Their states travel in the control packet as a bitmask:
+
+| GPIO | Toggle | Bit | Action on the robot |
+|------|--------|-----|---------------------|
+| 32 | LASER | 0 | Laser servo, PCA9685 ch 14 on j4_receiver |
+| 33 | VENT | 1 | Vent-fin servo, PCA9685 ch 15 on j4_receiver |
+| 13 | EYE POP | 2 | Eye-pop steppers: sends 0 (normal) or 3200 (popped) down the stepper chain (j4_stepper_neck to j4_stepper_eyes) |
+| 15 | AUX | 3 | Next to the right joystick; read and transmitted, not yet assigned |
 
 ## Keypad wiring
 

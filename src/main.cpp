@@ -12,6 +12,7 @@
 //     last updated:  2026-06-17 -- CDT
 //     last updated:  2026-07-02 -- CDT
 //     last updated:  2026-07-03 -- CDT
+//     last updated:  2026-07-04 -- CDT
 //
 //
 //           author:  Kevin Lange
@@ -89,6 +90,23 @@
 //                            sender MAC is not our receiver. ESP-NOW channel
 //                            pinned to 6 (ESPNOW_CHANNEL) to dodge other ESP-NOW
 //                            projects on the default channel 1.
+//                 v0_6_15 -- All control surfaces accounted for. Added ADS_03
+//                            (0x4A) + ADS_04 (0x4B): the eight middle face pots
+//                            (eyebrow L/R, basket eyebrow L/R, nose, nose basket,
+//                            bottom eyelid L/R) now read on ADS_01 + ADS_03 and
+//                            ride the ESP-NOW control packet to eight new PCA9685
+//                            servo channels on j4_receiver (ch 6-13). ADS_04 is
+//                            wired and initialized but its four channels are
+//                            spares for the future pots (neck-pivot etc.).
+//                            Added the four panel toggles on GPIO 32/33/13/15
+//                            (LASER, VENT, EYE POP, AUX by the right joystick;
+//                            INPUT_PULLUP, switch closes to GND). LASER + VENT
+//                            drive PCA9685 ch 14/15 on j4_receiver; EYE POP
+//                            replaces the old eye-pop pot (ADS_01 A2 freed) and
+//                            sends 0 or 3200 through the existing stepper path;
+//                            AUX is read + transmitted but unassigned. The
+//                            control packet gains eight pot fields + a toggle
+//                            bitmask (matching j4_receiver v0_7r_16).
 //
 //
 //
@@ -107,7 +125,11 @@
 //       18:  TFT SCLK             [USED BY TTGO]
 //       19:  TFT MOSI             [USED BY TTGO]
 //
-//       21:  SDA  [I2C BUS] (ADS_01 0x48, ADS_02 0x49, keypad 0x20)
+//       13:  EYE POP toggle (INPUT_PULLUP, switch closes to GND)
+//       15:  AUX toggle, next to the right joystick (INPUT_PULLUP, unassigned)
+//
+//       21:  SDA  [I2C BUS] (ADS_01 0x48, ADS_02 0x49, ADS_03 0x4A,
+//                            ADS_04 0x4B, keypad 0x20)
 //       22:  SCL  [I2C BUS]
 //
 //       23:  TFT RST              [USED BY TTGO]
@@ -115,6 +137,9 @@
 //       25:  DISPLAY-R TX  →  right XIAO D7 / GPIO44  (Serial2, reserved)
 //       26:  DISPLAY-R RX  ←  right XIAO D6 / GPIO43  (Serial2, pot feed)
 //       27:  DISPLAY-L RX  ←  left XIAO D6 / GPIO43   (Serial1)
+//
+//       32:  LASER toggle (INPUT_PULLUP, switch closes to GND)
+//       33:  VENT  toggle (INPUT_PULLUP, switch closes to GND)
 //
 //       34:  battery voltage sense
 //
@@ -135,24 +160,37 @@
 //
 //      ANALOG INPUTS
 //      ------------------------------------------------------------------
-//      Local, on the two ADS1115 ADCs (I2C):
-//      ADS_01 (0x48) A0:  (free -- was volume, now on j4_display_right)
-//      ADS_01 (0x48) A1:  (free -- was iris,   now on j4_display_right)
-//      ADS_01 (0x48) A2:  eye-pop (0-3200, like neck)     -> eye-pop steppers
+//      Local, on the four ADS1115 ADCs (I2C):
+//      ADS_01 (0x48) A0:  Eyebrow L pot         -> PCA9685 ch 6
+//      ADS_01 (0x48) A1:  Eyebrow R pot         -> PCA9685 ch 7
+//      ADS_01 (0x48) A2:  Basket Eyebrow L pot  -> PCA9685 ch 8  (was eye-pop pot)
+//      ADS_01 (0x48) A3:  Basket Eyebrow R pot  -> PCA9685 ch 9
 //      ADS_02 (0x49) A0:  eyes joystick X / eyes_x        -> eyes pan servo
 //      ADS_02 (0x49) A1:  eyes joystick Y / eyes_y        -> eyes tilt servo
 //      ADS_02 (0x49) A2:  neck joystick X
 //      ADS_02 (0x49) A3:  neck joystick Y (jaw)  -> mixed into neck-L / neck-R
+//      ADS_03 (0x4A) A0:  Nose pot (up/down)    -> PCA9685 ch 10
+//      ADS_03 (0x4A) A1:  Nose Basket pot       -> PCA9685 ch 11
+//      ADS_03 (0x4A) A2:  Bottom Eyelid L pot   -> PCA9685 ch 12
+//      ADS_03 (0x4A) A3:  Bottom Eyelid R pot   -> PCA9685 ch 13
+//      ADS_04 (0x4B) A0-A3: free (future pots: neck-pivot, spares)
 //
-//      Remote, from j4_display_right's ADS1115 over Serial2 ("P:" lines):
+//      TOGGLE INPUTS (INPUT_PULLUP, switch closes to GND, ON = LOW):
+//      GPIO 32:  LASER   -> PCA9685 ch 14 servo on j4_receiver
+//      GPIO 33:  VENT    -> PCA9685 ch 15 servo on j4_receiver
+//      GPIO 13:  EYE POP -> eye-pop steppers, sends 0 (normal) or 3200 (popped)
+//      GPIO 15:  AUX (next to the right joystick, unassigned; sent as a spare bit)
+//
+//      Remote, from j4_display_right's ADS1115 (0x48 on its own bus) over
+//      Serial2 ("P:" lines):
 //        iris        -> iris servo (PCA9685 on j4_receiver)
 //        color       -> WS2812B strip color   (j4_receiver)
 //        brightness  -> WS2812B strip brightness (j4_receiver)
 //        volume      -> j4_talk audio volume
 //
 //      Everything is sent to j4_receiver over ESP-NOW. The receiver drives
-//      the eye servos + LED strip, forwards neck + eye-pop to j4_stepper,
-//      and relays volume to j4_talk.
+//      the face/eye servos + LED strip, forwards neck + eye-pop to
+//      j4_stepper_neck, and relays volume to j4_talk.
 //      ------------------------------------------------------------------
 //
 //
@@ -196,6 +234,18 @@ void sendFileListToXIAO();
 #define XIAOR_RX_PIN 26    // Serial2: GPIO26 input  ← right XIAO D6 (pot feed)
 #define XIAO_BAUD    115200
 #define JOYSTICK_DEAD_ZONE 200  // counts either side of 1600 to snap to center (scaled for 0-3200 range)
+
+// Panel toggle switches (INPUT_PULLUP, switch closes to GND, ON = LOW)
+#define LASER_TOGGLE_PIN    32  // -> laser servo, PCA9685 ch 14 on j4_receiver
+#define VENT_TOGGLE_PIN     33  // -> vent servo,  PCA9685 ch 15 on j4_receiver
+#define EYE_POP_TOGGLE_PIN  13  // -> eye-pop steppers, 0 (normal) / 3200 (popped)
+#define AUX_TOGGLE_PIN      15  // next to the right joystick; unassigned spare
+
+// Toggle bit positions in xmitData.toggles_xmit (1 = switch ON)
+#define TOGGLE_BIT_LASER    0
+#define TOGGLE_BIT_VENT     1
+#define TOGGLE_BIT_EYE_POP  2
+#define TOGGLE_BIT_AUX      3
 
 // Binary packet sent to the XIAO display board over Serial1.
 // Both ends must keep this struct identical.
@@ -254,6 +304,8 @@ typedef struct __attribute__((packed)) {
 
 ADS1115 ADS_01(0x48);  // ADDRESS PIN TO GND
 ADS1115 ADS_02(0x49);  // ADDRESS PIN TO VDD
+ADS1115 ADS_03(0x4A);  // ADDRESS PIN TO SDA
+ADS1115 ADS_04(0x4B);  // ADDRESS PIN TO SCL (all four channels spare for now)
 
 
 // --- ESP-NOW RELATED ---
@@ -288,9 +340,18 @@ typedef struct __attribute__((packed)) struct_message_xmit {
   int16_t brightness_xmit;           // WS2812B strip brightness, 0-255 (j4_display_right)
   int16_t eyes_x_xmit;               // eyes joystick X -> eyes_x servo
   int16_t eyes_y_xmit;               // eyes joystick Y -> eyes_y servo
-  int16_t eye_pop_xmit;              // eye-pop steppers, 0-3200 like neck
+  int16_t eye_pop_xmit;              // eye-pop steppers, 0 or 3200 (EYE POP toggle)
   int16_t neck_left_xmit;
   int16_t neck_right_xmit;
+  int16_t eyebrow_l_xmit;            // Eyebrow L pot        -> PCA9685 ch 6
+  int16_t eyebrow_r_xmit;            // Eyebrow R pot        -> PCA9685 ch 7
+  int16_t basket_brow_l_xmit;        // Basket Eyebrow L pot -> PCA9685 ch 8
+  int16_t basket_brow_r_xmit;        // Basket Eyebrow R pot -> PCA9685 ch 9
+  int16_t nose_xmit;                 // Nose pot (up/down)   -> PCA9685 ch 10
+  int16_t nose_basket_xmit;          // Nose Basket pot      -> PCA9685 ch 11
+  int16_t eyelid_l_xmit;             // Bottom Eyelid L pot  -> PCA9685 ch 12
+  int16_t eyelid_r_xmit;             // Bottom Eyelid R pot  -> PCA9685 ch 13
+  uint8_t toggles_xmit;              // bit 0 LASER, 1 VENT, 2 EYE POP, 3 AUX
   uint8_t need_filelist_xmit;        // 1 = still waiting on the file list
   uint8_t display_l_ok_xmit;         // 1 = controller sees j4_display_left heartbeat
   uint8_t display_r_ok_xmit;         // 1 = controller sees j4_display_right pot feed
@@ -338,11 +399,27 @@ int color_value     = 0;   // from j4_display_right -> WS2812B color
 int brightness_value = 0;  // from j4_display_right -> WS2812B brightness
 int eyes_x_value    = 0;   // eyes joystick X (was left-arm pot)
 int eyes_y_value    = 0;   // eyes joystick Y (was right-arm pot)
-int eye_pop_value   = 0;   // eye-pop steppers, 0-3200 (was spot pot)
+int eye_pop_value   = 0;   // eye-pop steppers, 0 or 3200 (EYE POP toggle)
 int neck_value       = 0;  // joystick X-axis raw
 int jaw_value        = 0;  // joystick Y-axis raw
 int neck_left_value  = 0;
 int neck_right_value = 0;
+
+// Middle face pots (0-255, mapped to PCA9685 servo channels on j4_receiver)
+int eyebrow_l_value     = 0;  // ADS_01 A0
+int eyebrow_r_value     = 0;  // ADS_01 A1
+int basket_brow_l_value = 0;  // ADS_01 A2
+int basket_brow_r_value = 0;  // ADS_01 A3
+int nose_value          = 0;  // ADS_03 A0
+int nose_basket_value   = 0;  // ADS_03 A1
+int eyelid_l_value      = 0;  // ADS_03 A2
+int eyelid_r_value      = 0;  // ADS_03 A3
+
+// Panel toggles (true = switch ON, pin pulled to GND)
+bool laser_toggle   = false;
+bool vent_toggle    = false;
+bool eye_pop_toggle = false;
+bool aux_toggle     = false;
 
 // Raw ADS1115 counts streamed from j4_display_right's "P:" lines. Held raw so
 // the same processPot() scaling applies as for the local ADS channels.
@@ -433,6 +510,26 @@ void setup() {
   ADS_02.setDataRate(7);
   ADS_02.setMode(1);
   ADS_02.requestADC(0);
+
+  ADS_03.begin();
+  delay(10);
+  ADS_03.setGain(0);
+  ADS_03.setDataRate(7);
+  ADS_03.setMode(1);
+  ADS_03.requestADC(0);
+
+  ADS_04.begin();     // all four channels spare -- initialized, not yet read
+  delay(10);
+  ADS_04.setGain(0);
+  ADS_04.setDataRate(7);
+  ADS_04.setMode(1);
+  ADS_04.requestADC(0);
+
+  // Panel toggles: switch closes to GND, so ON reads LOW
+  pinMode(LASER_TOGGLE_PIN,   INPUT_PULLUP);
+  pinMode(VENT_TOGGLE_PIN,    INPUT_PULLUP);
+  pinMode(EYE_POP_TOGGLE_PIN, INPUT_PULLUP);
+  pinMode(AUX_TOGGLE_PIN,     INPUT_PULLUP);
 
   // XIAO display links - init after ADS1115 to avoid I2C/UART peripheral conflict
   Serial1.begin(XIAO_BAUD, SERIAL_8N1, XIAO_RX_PIN,  XIAO_TX_PIN);    // j4_display_left
@@ -539,18 +636,32 @@ void loop() {
   }
 
   // --- ADC READS ---
-  // ADS_01 A0/A1 are free (volume + iris moved to j4_display_right's ADS1115).
-  eye_pop_value   = processPot(ADS_01.readADC(2), 3200);  // eye-pop, 0-3200 like neck (was spot pot)
+  // ADS_04 (0x4B) is on the bus but all four channels are spares -- not read.
+  eyebrow_l_value     = processPot(ADS_01.readADC(0), 255);  // Eyebrow L
+  eyebrow_r_value     = processPot(ADS_01.readADC(1), 255);  // Eyebrow R
+  basket_brow_l_value = processPot(ADS_01.readADC(2), 255);  // Basket Eyebrow L (was eye-pop pot)
+  basket_brow_r_value = processPot(ADS_01.readADC(3), 255);  // Basket Eyebrow R
   eyes_x_value    = processPot(ADS_02.readADC(0), 255);   // eyes joystick X (was left-arm pot)
   eyes_y_value    = processPot(ADS_02.readADC(1), 255);   // eyes joystick Y (was right-arm pot)
   neck_value      = processPot(ADS_02.readADC(2), 3200);  // joystick X
   jaw_value       = processPot(ADS_02.readADC(3), 3200);  // joystick Y
+  nose_value          = processPot(ADS_03.readADC(0), 255);  // Nose (up/down)
+  nose_basket_value   = processPot(ADS_03.readADC(1), 255);  // Nose Basket (up/down)
+  eyelid_l_value      = processPot(ADS_03.readADC(2), 255);  // Bottom Eyelid L
+  eyelid_r_value      = processPot(ADS_03.readADC(3), 255);  // Bottom Eyelid R
   // Remote pots from j4_display_right (same raw scale -> same processPot)
   iris_value       = processPot(dispR_iris_raw, 255);
   color_value      = processPot(dispR_color_raw, 255);
   brightness_value = processPot(dispR_brightness_raw, 255);
   volume_value     = processPot(dispR_volume_raw, 100);
   // --- END ADC READS ---
+
+  // Panel toggles: INPUT_PULLUP, switch closes to GND, so ON = LOW
+  laser_toggle   = (digitalRead(LASER_TOGGLE_PIN)   == LOW);
+  vent_toggle    = (digitalRead(VENT_TOGGLE_PIN)    == LOW);
+  eye_pop_toggle = (digitalRead(EYE_POP_TOGGLE_PIN) == LOW);
+  aux_toggle     = (digitalRead(AUX_TOGGLE_PIN)     == LOW);
+  eye_pop_value  = eye_pop_toggle ? 3200 : 0;  // popped / normal
 
   // Dead zone: snap joystick axes to center if within threshold
   if (abs(neck_value - 1600) <= JOYSTICK_DEAD_ZONE) neck_value = 1600;
@@ -569,6 +680,18 @@ void loop() {
   xmitData.eye_pop_xmit     = eye_pop_value;
   xmitData.neck_left_xmit   = neck_left_value;
   xmitData.neck_right_xmit  = neck_right_value;
+  xmitData.eyebrow_l_xmit     = eyebrow_l_value;
+  xmitData.eyebrow_r_xmit     = eyebrow_r_value;
+  xmitData.basket_brow_l_xmit = basket_brow_l_value;
+  xmitData.basket_brow_r_xmit = basket_brow_r_value;
+  xmitData.nose_xmit          = nose_value;
+  xmitData.nose_basket_xmit   = nose_basket_value;
+  xmitData.eyelid_l_xmit      = eyelid_l_value;
+  xmitData.eyelid_r_xmit      = eyelid_r_value;
+  xmitData.toggles_xmit       = (laser_toggle   << TOGGLE_BIT_LASER)
+                              | (vent_toggle    << TOGGLE_BIT_VENT)
+                              | (eye_pop_toggle << TOGGLE_BIT_EYE_POP)
+                              | (aux_toggle     << TOGGLE_BIT_AUX);
   xmitData.need_filelist_xmit = jukeboxReady ? 0 : 1;
   xmitData.display_l_ok_xmit  = (millis() - lastDisplayMs  < DISPLAY_TIMEOUT_MS) ? 1 : 0;
   xmitData.display_r_ok_xmit  = (millis() - lastDisplayRMs < DISPLAY_TIMEOUT_MS) ? 1 : 0;
