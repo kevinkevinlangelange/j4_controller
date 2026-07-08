@@ -119,6 +119,20 @@
 //                            read 0 (joystick axes centre at 1600) and are
 //                            re-probed each pass, so the board runs fine bare
 //                            on USB power and ADCs can even be hot-plugged.
+//                 v0_6_17 -- Fixed the second lockup (~2s after boot, bare
+//                            board): esp_now_send() ran every loop pass, only
+//                            ever throttled by the old blocking ADC reads.
+//                            With no ADCs the loop spun at multi-kHz, sends
+//                            fired thousands of times a second, and
+//                            OnDataSent (WiFi task) assigned to the
+//                            connectStatus String each time -- heap ops
+//                            racing loop()'s own, corrupting the heap in
+//                            seconds. Control TX now runs on a 40ms timer
+//                            (25 Hz, matching the receiver's 20ms gate), the
+//                            callbacks only store plain flags, and the
+//                            file-list forward to the display moved from
+//                            OnDataRecv into loop() so Serial1 is written
+//                            from one context only.
 //
 //
 //
@@ -449,9 +463,15 @@ uint16_t bat1_mv = 0;
 unsigned long tft_update_previousMillis = 0;
 unsigned long battery_01_previousMillis = 0;
 unsigned long keypad_previousMillis     = 0;
+unsigned long control_tx_previousMillis = 0;
 const unsigned long tft_update_interval = 40;   // 25 fps
 const unsigned long battery_01_interval = 500;
 const unsigned long keypad_interval     = 150;
+const unsigned long control_tx_interval = 40;   // 25 Hz control packets
+
+// Set by OnDataRecv (WiFi task), consumed by loop(): forward the completed
+// jukebox file list to j4_display_left from loop context only.
+volatile bool filelistForwardPending = false;
 
 
 PCF8574 pcf8574(0x20);
@@ -654,6 +674,15 @@ void loop() {
     }
   }
 
+  // --- CONTROL TX (25 Hz): read inputs, fill the packet, send ---
+  // This whole block MUST stay rate-limited. When it ran every loop pass the
+  // pass rate was only held down by the blocking ADC reads; with no ADCs
+  // attached the loop spun at multi-kHz, esp_now_send() fired thousands of
+  // times a second, and the OnDataSent callback storm corrupted the heap
+  // (lockup ~2s after boot). 25 Hz matches the receiver's 20ms packet gate.
+  if (currentMillis - control_tx_previousMillis >= control_tx_interval) {
+  control_tx_previousMillis = currentMillis;
+
   // --- ADC READS ---
   // Each module is probed before its channels are read: readADC() on an
   // absent chip never returns (see adsReady()). ADS_04 (0x4B) is spare.
@@ -728,6 +757,22 @@ void loop() {
   xmitData.need_filelist_xmit = jukeboxReady ? 0 : 1;
   xmitData.display_l_ok_xmit  = (millis() - lastDisplayMs  < DISPLAY_TIMEOUT_MS) ? 1 : 0;
   xmitData.display_r_ok_xmit  = (millis() - lastDisplayRMs < DISPLAY_TIMEOUT_MS) ? 1 : 0;
+
+  esp_now_send(broadcastAddress, (uint8_t *)&xmitData, sizeof(xmitData));
+
+  // Render the last send result (flag set by OnDataSent in the WiFi task)
+  // into the display String from loop context only -- String ops inside the
+  // callback raced loop()'s heap use and corrupted it.
+  connectStatus = connectError ? "xmit failed" : "xmit success";
+  }
+  // --- END CONTROL TX ---
+
+  // File list completed by OnDataRecv (WiFi task): forward it to the display
+  // from here so Serial1 is only ever written from loop context.
+  if (filelistForwardPending) {
+    filelistForwardPending = false;
+    sendFileListToXIAO();
+  }
 
   // --- BATTERY RELATED ---
   if (currentMillis - battery_01_previousMillis >= battery_01_interval) {
@@ -816,20 +861,14 @@ void loop() {
     }
   }
 
-  // --- ESP-NOW RELATED ---
-  esp_now_send(broadcastAddress, (uint8_t *)&xmitData, sizeof(xmitData));
 }
 
 
 // --- ESP-NOW RELATED ---
+// Runs in the WiFi task: flag stores only. No String/heap work and no
+// peripheral writes in here -- both raced loop() and corrupted the heap.
 void OnDataSent(const uint8_t *mac_addr, esp_now_send_status_t status) {
-  if (status == ESP_NOW_SEND_SUCCESS) {
-    connectStatus = "xmit success";
-    connectError = LOW;
-  } else {
-    connectStatus = "xmit failed";
-    connectError = HIGH;
-  }
+  connectError = (status != ESP_NOW_SEND_SUCCESS);
 }
 
 void OnDataRecv(const uint8_t *mac, const uint8_t *incomingData, int len) {
@@ -866,7 +905,7 @@ void OnDataRecv(const uint8_t *mac, const uint8_t *incomingData, int len) {
 
     if (chunksReceived >= chunksExpected) {
       jukeboxReady = true;
-      sendFileListToXIAO();
+      filelistForwardPending = true;   // forwarded from loop(), not this WiFi-task context
     }
 
   } else if (pkt_type == ESPNOW_PKT_STATUS && len == sizeof(struct_message_rcv)) {
