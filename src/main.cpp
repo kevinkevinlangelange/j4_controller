@@ -14,6 +14,7 @@
 //     last updated:  2026-07-03 -- CDT
 //     last updated:  2026-07-04 -- CDT
 //     last updated:  2026-07-08 -- CDT
+//     version increment:  20260708--002
 //
 //
 //           author:  Kevin Lange
@@ -133,6 +134,19 @@
 //                            file-list forward to the display moved from
 //                            OnDataRecv into loop() so Serial1 is written
 //                            from one context only.
+//                 v0_6_18 -- Fixed the ~2s-per-cycle stall on a bare board:
+//                            with no I2C modules attached the bus has no
+//                            pull-ups (they live on the breakouts), so a
+//                            probe doesn't fast-NACK -- it eats the driver
+//                            timeout + bus recovery, hundreds of ms each,
+//                            and three probes per 40ms control cycle kept
+//                            loop() almost always blocked (button worked
+//                            only in the tiny gap between cycles).
+//                            Wire.setTimeOut(10) caps every transaction,
+//                            absent devices are re-probed only once per
+//                            second (I2C_REPROBE_MS), and the keypad scan
+//                            is gated on the PCF8574 ACKing (a floating bus
+//                            read looks like a key held down forever).
 //
 //
 //
@@ -523,31 +537,78 @@ int processPot(int raw, int out_max) {
   return map(raw, 0, 17000, 0, out_max);
 }
 
-// ADS1115 presence guard. The ADS1X15 library's readADC() has NO timeout:
-// with no chip on the bus, isBusy() never clears and readADC() spins forever,
-// freezing loop() (screen dead, button dead, no ESP-NOW). yield() feeds the
-// watchdog so it never even reboots. So: a module must ACK on the bus this
-// very pass before any of its channels are read; absent modules read as 0
-// and just start working when plugged in (they get (re)configured on return).
-bool ads_01_configured = false;
-bool ads_02_configured = false;
-bool ads_03_configured = false;
-bool ads_04_configured = false;
+// I2C presence guards. Two traps when a device is missing:
+//  1. The ADS1X15 library's readADC() has NO timeout: with no chip on the
+//     bus, isBusy() never clears and readADC() spins forever, freezing
+//     loop() (screen dead, button dead, no ESP-NOW).
+//  2. With NO modules attached at all, the bus has no pull-ups (they live on
+//     the breakout boards), so a transaction doesn't fast-NACK -- it eats the
+//     driver timeout + bus recovery, hundreds of ms EACH. Probing every
+//     absent device every cycle made loop() spend ~2s blocked per pass.
+// So: transactions are capped short (Wire.setTimeOut in setup), a device
+// must ACK before it is trusted, and an ABSENT device is only re-probed
+// every I2C_REPROBE_MS. A present device ACKs in microseconds, so verifying
+// it on every use costs nothing, and hot-plugged modules start working
+// within a second.
+#define I2C_REPROBE_MS 1000
 
-bool adsReady(ADS1115 &ads, bool &configured) {
-  if (!ads.isConnected()) {   // cheap 1-byte I2C probe
-    configured = false;
+bool i2cPresent(uint8_t addr) {
+  Wire.beginTransmission(addr);
+  return Wire.endTransmission() == 0;
+}
+
+struct AdsGuard {
+  ADS1115 &ads;
+  uint8_t addr;
+  bool configured;
+  unsigned long lastProbe;
+  bool probedOnce;
+  AdsGuard(ADS1115 &a, uint8_t adr)
+    : ads(a), addr(adr), configured(false), lastProbe(0), probedOnce(false) {}
+};
+
+AdsGuard adsg_01(ADS_01, 0x48);
+AdsGuard adsg_02(ADS_02, 0x49);
+AdsGuard adsg_03(ADS_03, 0x4A);
+AdsGuard adsg_04(ADS_04, 0x4B);
+
+bool adsReady(AdsGuard &g) {
+  if (!g.configured) {   // absent (or never seen): probe only once a second
+    unsigned long now = millis();
+    if (g.probedOnce && (now - g.lastProbe < I2C_REPROBE_MS)) return false;
+    g.probedOnce = true;
+    g.lastProbe  = now;
+  }
+  if (!i2cPresent(g.addr)) {
+    g.configured = false;
     return false;
   }
-  if (!configured) {
-    ads.begin();
-    ads.setGain(0);      //  0 is ±6.144V    1 is ±4.096V    2 is ±2.048V
-    ads.setDataRate(7);  //  0 = slow   4 = medium   7 = fast
-    ads.setMode(1);      //  0 = continuous mode   1 = single mode
-    ads.requestADC(0);   //  first read to trigger
-    configured = true;
+  if (!g.configured) {
+    g.ads.begin();
+    g.ads.setGain(0);      //  0 is ±6.144V    1 is ±4.096V    2 is ±2.048V
+    g.ads.setDataRate(7);  //  0 = slow   4 = medium   7 = fast
+    g.ads.setMode(1);      //  0 = continuous mode   1 = single mode
+    g.ads.requestADC(0);   //  first read to trigger
+    g.configured = true;
   }
   return true;
+}
+
+// Same guard for the PCF8574 keypad expander: absent, its floating-bus reads
+// look like a key held down forever, so no scan unless it ACKs.
+bool          keypad_present    = false;
+unsigned long keypad_lastProbe  = 0;
+bool          keypad_probedOnce = false;
+
+bool keypadReady() {
+  if (!keypad_present) {
+    unsigned long now = millis();
+    if (keypad_probedOnce && (now - keypad_lastProbe < I2C_REPROBE_MS)) return false;
+    keypad_probedOnce = true;
+    keypad_lastProbe  = now;
+  }
+  keypad_present = i2cPresent(0x20);   // matches the pcf8574 constructor address
+  return keypad_present;
 }
 
 
@@ -556,13 +617,19 @@ void setup() {
   pcf8574.begin();
   Serial.begin(115200);
 
+  // Cap each I2C transaction. With no modules attached the bus has no
+  // pull-ups and a transaction eats driver timeout + recovery instead of a
+  // fast NACK; uncapped that is hundreds of ms per attempt. A healthy
+  // transaction completes in well under 1ms, so 10ms is generous.
+  Wire.setTimeOut(10);
+
   // Probe + configure whichever ADS1115 modules are actually on the bus.
   // Missing ones are fine: their channels read 0 and they are re-probed
-  // every loop pass, so plugging one in just starts working.
-  adsReady(ADS_01, ads_01_configured);
-  adsReady(ADS_02, ads_02_configured);
-  adsReady(ADS_03, ads_03_configured);
-  adsReady(ADS_04, ads_04_configured);  // all four channels spare -- not yet read
+  // every I2C_REPROBE_MS, so plugging one in just starts working.
+  adsReady(adsg_01);
+  adsReady(adsg_02);
+  adsReady(adsg_03);
+  adsReady(adsg_04);  // all four channels spare -- not yet read
 
   // Panel toggles: switch closes to GND, so ON reads LOW
   pinMode(LASER_TOGGLE_PIN,   INPUT_PULLUP);
@@ -686,7 +753,7 @@ void loop() {
   // --- ADC READS ---
   // Each module is probed before its channels are read: readADC() on an
   // absent chip never returns (see adsReady()). ADS_04 (0x4B) is spare.
-  if (adsReady(ADS_01, ads_01_configured)) {
+  if (adsReady(adsg_01)) {
     eyebrow_l_value     = processPot(ADS_01.readADC(0), 255);  // Eyebrow L
     eyebrow_r_value     = processPot(ADS_01.readADC(1), 255);  // Eyebrow R
     basket_brow_l_value = processPot(ADS_01.readADC(2), 255);  // Basket Eyebrow L (was eye-pop pot)
@@ -694,7 +761,7 @@ void loop() {
   } else {
     eyebrow_l_value = eyebrow_r_value = basket_brow_l_value = basket_brow_r_value = 0;
   }
-  if (adsReady(ADS_02, ads_02_configured)) {
+  if (adsReady(adsg_02)) {
     eyes_x_value    = processPot(ADS_02.readADC(0), 255);   // eyes joystick X (was left-arm pot)
     eyes_y_value    = processPot(ADS_02.readADC(1), 255);   // eyes joystick Y (was right-arm pot)
     neck_value      = processPot(ADS_02.readADC(2), 3200);  // joystick X
@@ -703,7 +770,7 @@ void loop() {
     eyes_x_value = eyes_y_value = 0;
     neck_value   = jaw_value    = 1600;   // joystick centre, not hard-over
   }
-  if (adsReady(ADS_03, ads_03_configured)) {
+  if (adsReady(adsg_03)) {
     nose_value          = processPot(ADS_03.readADC(0), 255);  // Nose (up/down)
     nose_basket_value   = processPot(ADS_03.readADC(1), 255);  // Nose Basket (up/down)
     eyelid_l_value      = processPot(ADS_03.readADC(2), 255);  // Bottom Eyelid L
@@ -801,7 +868,7 @@ void loop() {
   if (currentMillis - keypad_previousMillis >= keypad_interval) {
     keypad_previousMillis = currentMillis;
 
-    if (kpIsPressed()) {
+    if (keypadReady() && kpIsPressed()) {
       uint8_t rawKey = kpGetKey();
 
       if (rawKey <= 15) {  // 16 = NoKey - only promote to global on valid read
