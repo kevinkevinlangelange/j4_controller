@@ -13,6 +13,7 @@
 //     last updated:  2026-07-02 -- CDT
 //     last updated:  2026-07-03 -- CDT
 //     last updated:  2026-07-04 -- CDT
+//     last updated:  2026-07-08 -- CDT
 //
 //
 //           author:  Kevin Lange
@@ -107,6 +108,17 @@
 //                            AUX is read + transmitted but unassigned. The
 //                            control packet gains eight pot fields + a toggle
 //                            bitmask (matching j4_receiver v0_7r_16).
+//                 v0_6_16 -- Fixed a total lockup when any ADS1115 is absent:
+//                            the ADS1X15 library's readADC() has no timeout,
+//                            so with no chip on the bus isBusy() never clears
+//                            and the first read in loop() spun forever (frozen
+//                            screen, dead button, no ESP-NOW; yield() kept the
+//                            watchdog fed so it never rebooted). Every module
+//                            is now probed with isConnected() before its
+//                            channels are read (adsReady()); absent modules
+//                            read 0 (joystick axes centre at 1600) and are
+//                            re-probed each pass, so the board runs fine bare
+//                            on USB power and ADCs can even be hot-plugged.
 //
 //
 //
@@ -491,39 +503,46 @@ int processPot(int raw, int out_max) {
   return map(raw, 0, 17000, 0, out_max);
 }
 
+// ADS1115 presence guard. The ADS1X15 library's readADC() has NO timeout:
+// with no chip on the bus, isBusy() never clears and readADC() spins forever,
+// freezing loop() (screen dead, button dead, no ESP-NOW). yield() feeds the
+// watchdog so it never even reboots. So: a module must ACK on the bus this
+// very pass before any of its channels are read; absent modules read as 0
+// and just start working when plugged in (they get (re)configured on return).
+bool ads_01_configured = false;
+bool ads_02_configured = false;
+bool ads_03_configured = false;
+bool ads_04_configured = false;
+
+bool adsReady(ADS1115 &ads, bool &configured) {
+  if (!ads.isConnected()) {   // cheap 1-byte I2C probe
+    configured = false;
+    return false;
+  }
+  if (!configured) {
+    ads.begin();
+    ads.setGain(0);      //  0 is ±6.144V    1 is ±4.096V    2 is ±2.048V
+    ads.setDataRate(7);  //  0 = slow   4 = medium   7 = fast
+    ads.setMode(1);      //  0 = continuous mode   1 = single mode
+    ads.requestADC(0);   //  first read to trigger
+    configured = true;
+  }
+  return true;
+}
+
 
 void setup() {
   Wire.begin(SDA, SCL);
   pcf8574.begin();
   Serial.begin(115200);
 
-  ADS_01.begin();
-  delay(10);
-  ADS_01.setGain(0);      //  0 is ±6.144V    1 is ±4.096V    2 is ±2.048V
-  ADS_01.setDataRate(7);  //  0 = slow   4 = medium   7 = fast
-  ADS_01.setMode(1);      //  0 = continuous mode   1 = single mode
-  ADS_01.requestADC(0);   //  first read to trigger
-
-  ADS_02.begin();
-  delay(10);
-  ADS_02.setGain(0);
-  ADS_02.setDataRate(7);
-  ADS_02.setMode(1);
-  ADS_02.requestADC(0);
-
-  ADS_03.begin();
-  delay(10);
-  ADS_03.setGain(0);
-  ADS_03.setDataRate(7);
-  ADS_03.setMode(1);
-  ADS_03.requestADC(0);
-
-  ADS_04.begin();     // all four channels spare -- initialized, not yet read
-  delay(10);
-  ADS_04.setGain(0);
-  ADS_04.setDataRate(7);
-  ADS_04.setMode(1);
-  ADS_04.requestADC(0);
+  // Probe + configure whichever ADS1115 modules are actually on the bus.
+  // Missing ones are fine: their channels read 0 and they are re-probed
+  // every loop pass, so plugging one in just starts working.
+  adsReady(ADS_01, ads_01_configured);
+  adsReady(ADS_02, ads_02_configured);
+  adsReady(ADS_03, ads_03_configured);
+  adsReady(ADS_04, ads_04_configured);  // all four channels spare -- not yet read
 
   // Panel toggles: switch closes to GND, so ON reads LOW
   pinMode(LASER_TOGGLE_PIN,   INPUT_PULLUP);
@@ -636,19 +655,33 @@ void loop() {
   }
 
   // --- ADC READS ---
-  // ADS_04 (0x4B) is on the bus but all four channels are spares -- not read.
-  eyebrow_l_value     = processPot(ADS_01.readADC(0), 255);  // Eyebrow L
-  eyebrow_r_value     = processPot(ADS_01.readADC(1), 255);  // Eyebrow R
-  basket_brow_l_value = processPot(ADS_01.readADC(2), 255);  // Basket Eyebrow L (was eye-pop pot)
-  basket_brow_r_value = processPot(ADS_01.readADC(3), 255);  // Basket Eyebrow R
-  eyes_x_value    = processPot(ADS_02.readADC(0), 255);   // eyes joystick X (was left-arm pot)
-  eyes_y_value    = processPot(ADS_02.readADC(1), 255);   // eyes joystick Y (was right-arm pot)
-  neck_value      = processPot(ADS_02.readADC(2), 3200);  // joystick X
-  jaw_value       = processPot(ADS_02.readADC(3), 3200);  // joystick Y
-  nose_value          = processPot(ADS_03.readADC(0), 255);  // Nose (up/down)
-  nose_basket_value   = processPot(ADS_03.readADC(1), 255);  // Nose Basket (up/down)
-  eyelid_l_value      = processPot(ADS_03.readADC(2), 255);  // Bottom Eyelid L
-  eyelid_r_value      = processPot(ADS_03.readADC(3), 255);  // Bottom Eyelid R
+  // Each module is probed before its channels are read: readADC() on an
+  // absent chip never returns (see adsReady()). ADS_04 (0x4B) is spare.
+  if (adsReady(ADS_01, ads_01_configured)) {
+    eyebrow_l_value     = processPot(ADS_01.readADC(0), 255);  // Eyebrow L
+    eyebrow_r_value     = processPot(ADS_01.readADC(1), 255);  // Eyebrow R
+    basket_brow_l_value = processPot(ADS_01.readADC(2), 255);  // Basket Eyebrow L (was eye-pop pot)
+    basket_brow_r_value = processPot(ADS_01.readADC(3), 255);  // Basket Eyebrow R
+  } else {
+    eyebrow_l_value = eyebrow_r_value = basket_brow_l_value = basket_brow_r_value = 0;
+  }
+  if (adsReady(ADS_02, ads_02_configured)) {
+    eyes_x_value    = processPot(ADS_02.readADC(0), 255);   // eyes joystick X (was left-arm pot)
+    eyes_y_value    = processPot(ADS_02.readADC(1), 255);   // eyes joystick Y (was right-arm pot)
+    neck_value      = processPot(ADS_02.readADC(2), 3200);  // joystick X
+    jaw_value       = processPot(ADS_02.readADC(3), 3200);  // joystick Y
+  } else {
+    eyes_x_value = eyes_y_value = 0;
+    neck_value   = jaw_value    = 1600;   // joystick centre, not hard-over
+  }
+  if (adsReady(ADS_03, ads_03_configured)) {
+    nose_value          = processPot(ADS_03.readADC(0), 255);  // Nose (up/down)
+    nose_basket_value   = processPot(ADS_03.readADC(1), 255);  // Nose Basket (up/down)
+    eyelid_l_value      = processPot(ADS_03.readADC(2), 255);  // Bottom Eyelid L
+    eyelid_r_value      = processPot(ADS_03.readADC(3), 255);  // Bottom Eyelid R
+  } else {
+    nose_value = nose_basket_value = eyelid_l_value = eyelid_r_value = 0;
+  }
   // Remote pots from j4_display_right (same raw scale -> same processPot)
   iris_value       = processPot(dispR_iris_raw, 255);
   color_value      = processPot(dispR_color_raw, 255);
