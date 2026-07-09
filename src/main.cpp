@@ -14,7 +14,7 @@
 //     last updated:  2026-07-03 -- CDT
 //     last updated:  2026-07-04 -- CDT
 //     last updated:  2026-07-08 -- CDT
-//     version increment:  20260708--002
+//     version increment:  20260708--003
 //
 //
 //           author:  Kevin Lange
@@ -147,6 +147,21 @@
 //                            second (I2C_REPROBE_MS), and the keypad scan
 //                            is gated on the PCF8574 ACKing (a floating bus
 //                            read looks like a key held down forever).
+//                 v0_6_19 -- Disconnect-audit residual: only "PING" / "LIST?"
+//                            count as the j4_display_left heartbeat. Any line
+//                            used to count, so garbage from the floating RX
+//                            pin (display unplugged) faked CONNECTED.
+//                 v0_6_20 -- Second 4x4 keypad. keypad_left is the NEW keypad
+//                            (own PCF8574 backpack at 0x21 -- A0 jumper high;
+//                            a PCF8574A backpack would land at 0x39 instead);
+//                            keypad_right is the original at 0x20. Both drive
+//                            the same phrase-select logic for now, scanned
+//                            left-first, one key per pass, each with its own
+//                            keymap string (keymap_left starts as a copy of
+//                            keymap_right -- re-derive it if the new model's
+//                            matrix comes out scrambled). Each pad has its
+//                            own presence guard, so either can be absent or
+//                            hot-plugged.
 //
 //
 //
@@ -488,15 +503,29 @@ const unsigned long control_tx_interval = 40;   // 25 Hz control packets
 volatile bool filelistForwardPending = false;
 
 
-PCF8574 pcf8574(0x20);
+// Two 4x4 matrix keypads, each on its own PCF8574 I2C backpack:
+//   keypad_left  -- the NEW keypad, left side of the panel. ADDR jumpered to
+//                   0x21 (A0 high). If its backpack is a PCF8574A, the same
+//                   jumper lands at 0x39 instead -- change the two 0x21s.
+//   keypad_right -- the original keypad at 0x20 (all jumpers low).
+// For now both drive exactly the same phrase-select logic.
+PCF8574 pcf_left(0x21);
+PCF8574 pcf_right(0x20);
 TFT_eSPI tft = TFT_eSPI();
 TFT_eSprite screen_bottom_sprite_203 = TFT_eSprite(&tft);
 
 // Keypad wiring: keypad pin 1 plugs into P0 straight through.
 // Actual pin→signal: P0=Row3, P1=Row2, P2=Row1, P3=Col4, P4=Col3, P5=Col2, P6=Col1, P7=Row4
 // (P3 and P7 are swapped vs the I2CKeyPad library's expectation, so we scan manually.)
-// Keymap indexed by (drive_index*4 + read_index), drive order: P0,P1,P2,P7; read order: P3,P4,P5,P6
-char keymap[19] = "#9630852*741DCBANF";  // N = NoKey, F = Fail
+// Keymaps indexed by (drive_index*4 + read_index), drive order: P0,P1,P2,P7;
+// read order: P3,P4,P5,P6. N = NoKey, F = Fail.
+// keymap_right was derived on the bench for the original keypad. The left
+// keypad is a different model on the same backpack wiring, so it starts with
+// the same map -- if its keys come out scrambled, re-derive just that string
+// (press each key, note the character that appears, rearrange to match).
+char keymap_left[19]  = "#9630852*741DCBANF";
+char keymap_right[19] = "#9630852*741DCBANF";
+char last_key_char    = 'N';   // last decoded key, shown on the data screen
 int key      = -2;
 int old_key  = -1;
 String phrase_select_buffer = "";
@@ -509,24 +538,24 @@ bool ready_message = true;
 static const uint8_t KP_DRIVE_WRITE[4] = { 0xFE, 0xFD, 0xFB, 0x7F }; // ~(1<<P) for P=0,1,2,7
 static const uint8_t KP_READ_MASK      = 0x78;  // bits 3,4,5,6 = P3,P4,P5,P6
 
-bool kpIsPressed() {
-  pcf8574.write8(0x78);  // all row pins LOW, all col pins HIGH-Z
-  return (pcf8574.read8() & KP_READ_MASK) != KP_READ_MASK;
+bool kpIsPressed(PCF8574 &pcf) {
+  pcf.write8(0x78);  // all row pins LOW, all col pins HIGH-Z
+  return (pcf.read8() & KP_READ_MASK) != KP_READ_MASK;
 }
 
-uint8_t kpGetKey() {
+uint8_t kpGetKey(PCF8574 &pcf) {
   static const uint8_t READ_BIT[4] = { 3, 4, 5, 6 };  // P3,P4,P5,P6
   for (uint8_t d = 0; d < 4; d++) {
-    pcf8574.write8(KP_DRIVE_WRITE[d]);
-    uint8_t val = pcf8574.read8();
+    pcf.write8(KP_DRIVE_WRITE[d]);
+    uint8_t val = pcf.read8();
     for (uint8_t r = 0; r < 4; r++) {
       if (!(val & (1 << READ_BIT[r]))) {
-        pcf8574.write8(0xFF);
+        pcf.write8(0xFF);
         return d * 4 + r;
       }
     }
   }
-  pcf8574.write8(0xFF);
+  pcf.write8(0xFF);
   return 16;  // NoKey
 }
 
@@ -594,34 +623,45 @@ bool adsReady(AdsGuard &g) {
   return true;
 }
 
-// Same guard for the PCF8574 keypad expander: absent, its floating-bus reads
-// look like a key held down forever, so no scan unless it ACKs.
-bool          keypad_present    = false;
-unsigned long keypad_lastProbe  = 0;
-bool          keypad_probedOnce = false;
+// Same guard for the PCF8574 keypad expanders: absent, their floating-bus
+// reads look like a key held down forever, so no scan unless the chip ACKs.
+struct KeypadGuard {
+  PCF8574      &pcf;
+  uint8_t       addr;
+  const char   *keymap;
+  bool          present;
+  unsigned long lastProbe;
+  bool          probedOnce;
+  KeypadGuard(PCF8574 &p, uint8_t a, const char *km)
+    : pcf(p), addr(a), keymap(km), present(false), lastProbe(0), probedOnce(false) {}
+};
 
-bool keypadReady() {
-  if (!keypad_present) {
+KeypadGuard kpg_left (pcf_left,  0x21, keymap_left);
+KeypadGuard kpg_right(pcf_right, 0x20, keymap_right);
+
+bool keypadReady(KeypadGuard &g) {
+  if (!g.present) {   // absent (or never seen): probe only once a second
     unsigned long now = millis();
-    if (keypad_probedOnce && (now - keypad_lastProbe < I2C_REPROBE_MS)) return false;
-    keypad_probedOnce = true;
-    keypad_lastProbe  = now;
+    if (g.probedOnce && (now - g.lastProbe < I2C_REPROBE_MS)) return false;
+    g.probedOnce = true;
+    g.lastProbe  = now;
   }
-  keypad_present = i2cPresent(0x20);   // matches the pcf8574 constructor address
-  return keypad_present;
+  g.present = i2cPresent(g.addr);
+  return g.present;
 }
 
 
 void setup() {
   Wire.begin(SDA, SCL);
-  pcf8574.begin();
-  Serial.begin(115200);
-
   // Cap each I2C transaction. With no modules attached the bus has no
   // pull-ups and a transaction eats driver timeout + recovery instead of a
   // fast NACK; uncapped that is hundreds of ms per attempt. A healthy
   // transaction completes in well under 1ms, so 10ms is generous.
   Wire.setTimeOut(10);
+
+  pcf_left.begin();    // both keypad expanders; fine if either is absent
+  pcf_right.begin();
+  Serial.begin(115200);
 
   // Probe + configure whichever ADS1115 modules are actually on the bus.
   // Missing ones are fine: their channels read 0 and they are re-probed
@@ -712,7 +752,10 @@ void loop() {
     char c = (char)Serial1.read();
     if (c == '\n') {
       xiaoSerialBuf.trim();
-      if (xiaoSerialBuf.length() > 0) lastDisplayMs = millis();   // any line = display alive
+      // Only lines j4_display_left actually sends count as its heartbeat --
+      // with the display unplugged the floating RX pin generates garbage
+      // lines, which used to fake a CONNECTED status.
+      if (xiaoSerialBuf == "PING" || xiaoSerialBuf == "LIST?") lastDisplayMs = millis();
       if (xiaoSerialBuf == "LIST?" && jukeboxReady) sendFileListToXIAO();
       xiaoSerialBuf = "";
     } else if (c != '\r') {
@@ -868,8 +911,13 @@ void loop() {
   if (currentMillis - keypad_previousMillis >= keypad_interval) {
     keypad_previousMillis = currentMillis;
 
-    if (keypadReady() && kpIsPressed()) {
-      uint8_t rawKey = kpGetKey();
+    // Scan both keypads -- they currently drive the same phrase-select
+    // logic, so the first pad with a key down wins the pass (left priority).
+    KeypadGuard *pads[2] = { &kpg_left, &kpg_right };
+    for (uint8_t p = 0; p < 2; p++) {
+      KeypadGuard &pad = *pads[p];
+      if (!keypadReady(pad) || !kpIsPressed(pad.pcf)) continue;
+      uint8_t rawKey = kpGetKey(pad.pcf);
 
       if (rawKey <= 15) {  // 16 = NoKey - only promote to global on valid read
       key = (int)rawKey;
@@ -882,7 +930,8 @@ void loop() {
       }
 
       if (key != old_key) {
-        char kc = keymap[key];
+        char kc = pad.keymap[key];
+        last_key_char = kc;
 
         if (kc == '#') {  // reset same-key lock and clear buffer
           old_key = -1;
@@ -925,6 +974,7 @@ void loop() {
         }
       }
       }  // end key <= 15 guard
+      break;   // one key per pass
     }
   }
 
@@ -1056,7 +1106,7 @@ void dataDisplaySprite() {
 
   if (!ready_message) {
     screen_bottom_sprite_203.drawString("Keypress: ",        0,  0, 2);
-    screen_bottom_sprite_203.drawString(String(keymap[key]), 70, 0, 2);
+    screen_bottom_sprite_203.drawString(String(last_key_char), 70, 0, 2);
   }
 
   screen_bottom_sprite_203.drawString(String(volume_value),    70,  40, 2);

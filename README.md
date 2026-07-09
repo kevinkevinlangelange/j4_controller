@@ -30,15 +30,15 @@ Johnny 4 is a prop robot controlled wirelessly. This board is the handheld contr
 | Microcontroller | LILYGO TTGO T-Display v1.1 (ESP32 with built-in 1.14" ST7789 TFT) |
 | ADC modules | Four ADS1115 (I2C addresses 0x48, 0x49, 0x4A, 0x4B); a fifth lives on j4_display_right |
 | Toggle switches | LASER, VENT, EYE POP, AUX -- GPIOs 32/33/13/15, INPUT_PULLUP, switch closes to GND |
-| Keypad expander | PCF8574 I2C I/O expander (address 0x20) |
-| Keypad | 4x4 matrix keypad, headers soldered directly into P0-P7 |
+| Keypad expanders | Two PCF8574 I2C I/O expanders: 0x21 (keypad_left, A0 jumper high) and 0x20 (keypad_right) |
+| Keypads | Two 4x4 matrix keypads, headers soldered directly into P0-P7; both currently drive the same phrase-select logic |
 | Displays | j4_display_left (jukebox, Serial1) + j4_display_right (pot labels, Serial2) |
 
 ## Pin assignments
 
 | GPIO | Function |
 |------|----------|
-| 21 | I2C SDA (ADS1115 x4, PCF8574 keypad) |
+| 21 | I2C SDA (ADS1115 x4, PCF8574 keypads x2) |
 | 22 | I2C SCL |
 | 17 | Serial1 TX to j4_display_left (XIAO D7) |
 | 27 | Serial1 RX from j4_display_left (XIAO D6) |
@@ -77,8 +77,8 @@ I2C SDA (ADS x4 + keypad) -- 21 |             |  5V
 
    on-board (no header pin): GPIO34 = battery sense, BOOT = GPIO0,
        GPIO35 = screen-cycle button, TFT on 4/5/16/18/19/23
-     I2C bus: ADS_01 @ 0x48, ADS_02 @ 0x49, ADS_03 @ 0x4A,
-       ADS_04 @ 0x4B, PCF8574 keypad @ 0x20
+     I2C bus: ADS_01 @ 0x48, ADS_02 @ 0x49, ADS_03 @ 0x4A, ADS_04 @ 0x4B,
+       PCF8574 keypad_left @ 0x21, keypad_right @ 0x20
      toggles: INPUT_PULLUP, switch closes to GND (ON = LOW)
 ```
 
@@ -130,9 +130,16 @@ Four panel toggles, each wired between its GPIO and GND (internal pull-up, ON = 
 
 ## Keypad wiring
 
-The keypad is plugged straight into PCF8574 P0-P7 (keypad pin 1 into P0, in order). The I2CKeyPad library's fixed scan pattern does not match this wiring, so the firmware uses a custom scan via the PCF8574 library directly.
+Two 4x4 keypads, each on its own PCF8574 backpack on the shared I2C bus:
 
-Actual pin-to-wire mapping:
+- **keypad_left** (the newer keypad, left of the panel) at **0x21** -- set the backpack's A0 jumper high. If that backpack turns out to be a PCF8574**A**, the same jumper lands at 0x39; change the two `0x21`s in `main.cpp`.
+- **keypad_right** (the original keypad) at **0x20** -- all jumpers low.
+
+Both keypads currently drive the same phrase-select logic; they are scanned left-first, one key per pass, and each can be absent or hot-plugged without affecting the other. Each has its own keymap string (`keymap_left` starts as a copy of `keymap_right`; if the new model's matrix ordering differs, re-derive just that string by pressing each key and rearranging).
+
+Each keypad is plugged straight into its PCF8574 P0-P7 (keypad pin 1 into P0, in order). The I2CKeyPad library's fixed scan pattern does not match this wiring, so the firmware uses a custom scan via the PCF8574 library directly.
+
+Actual pin-to-wire mapping (derived on the original keypad):
 
 | PCF pin | Keypad wire |
 |---------|-------------|
