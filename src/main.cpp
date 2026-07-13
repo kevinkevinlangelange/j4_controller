@@ -14,7 +14,8 @@
 //     last updated:  2026-07-03 -- CDT
 //     last updated:  2026-07-04 -- CDT
 //     last updated:  2026-07-08 -- CDT
-//     version increment:  20260708--003
+//     last updated:  2026-07-12 -- CDT
+//     version increment:  20260712--004
 //
 //
 //           author:  Kevin Lange
@@ -162,6 +163,19 @@
 //                            matrix comes out scrambled). Each pad has its
 //                            own presence guard, so either can be absent or
 //                            hot-plugged.
+//                 v0_6_21 -- ADS_04 (0x4B) goes live: A0 is the neck-pivot
+//                            pot (silver knob below j4_display_left, 0-3200
+//                            like neck L/R, rides the control packet in the
+//                            new neck_pivot field -> receiver -> nP on the
+//                            stepper link), A1/A2 are two linear fader pots.
+//                            fader_right doubles the IRIS pot (iris servo),
+//                            fader_left doubles the Nose Basket pot (PCA9685
+//                            ch 11). Each pair is arbitrated last-mover-wins:
+//                            whichever control moved most recently is the
+//                            active source and its value is used, so the two
+//                            never fight. A source that is absent (module
+//                            unplugged, display feed down) can neither claim
+//                            nor hold active status.
 //
 //
 //
@@ -228,7 +242,13 @@
 //      ADS_03 (0x4A) A1:  Nose Basket pot       -> PCA9685 ch 11
 //      ADS_03 (0x4A) A2:  Bottom Eyelid L pot   -> PCA9685 ch 12
 //      ADS_03 (0x4A) A3:  Bottom Eyelid R pot   -> PCA9685 ch 13
-//      ADS_04 (0x4B) A0-A3: free (future pots: neck-pivot, spares)
+//      ADS_04 (0x4B) A0:  neck-pivot pot (silver knob below j4_display_left)
+//                         -> nP on the stepper link, 0-3200
+//      ADS_04 (0x4B) A1:  fader_left  (linear fader) -> Nose Basket, shared
+//                         with ADS_03 A1 (last-mover-wins)
+//      ADS_04 (0x4B) A2:  fader_right (linear fader) -> iris, shared with
+//                         j4_display_right's IRIS pot (last-mover-wins)
+//      ADS_04 (0x4B) A3:  spare
 //
 //      TOGGLE INPUTS (INPUT_PULLUP, switch closes to GND, ON = LOW):
 //      GPIO 32:  LASER   -> PCA9685 ch 14 servo on j4_receiver
@@ -360,7 +380,7 @@ typedef struct __attribute__((packed)) {
 ADS1115 ADS_01(0x48);  // ADDRESS PIN TO GND
 ADS1115 ADS_02(0x49);  // ADDRESS PIN TO VDD
 ADS1115 ADS_03(0x4A);  // ADDRESS PIN TO SDA
-ADS1115 ADS_04(0x4B);  // ADDRESS PIN TO SCL (all four channels spare for now)
+ADS1115 ADS_04(0x4B);  // ADDRESS PIN TO SCL (A0 neck-pivot, A1/A2 faders, A3 spare)
 
 
 // --- ESP-NOW RELATED ---
@@ -398,6 +418,7 @@ typedef struct __attribute__((packed)) struct_message_xmit {
   int16_t eye_pop_xmit;              // eye-pop steppers, 0 or 3200 (EYE POP toggle)
   int16_t neck_left_xmit;
   int16_t neck_right_xmit;
+  int16_t neck_pivot_xmit;           // neck-pivot pot -> nP on the stepper link
   int16_t eyebrow_l_xmit;            // Eyebrow L pot        -> PCA9685 ch 6
   int16_t eyebrow_r_xmit;            // Eyebrow R pot        -> PCA9685 ch 7
   int16_t basket_brow_l_xmit;        // Basket Eyebrow L pot -> PCA9685 ch 8
@@ -459,6 +480,13 @@ int neck_value       = 0;  // joystick X-axis raw
 int jaw_value        = 0;  // joystick Y-axis raw
 int neck_left_value  = 0;
 int neck_right_value = 0;
+int neck_pivot_value = 1600;  // neck-pivot pot (ADS_04 A0); centre if absent
+
+// Linear fader pots (ADS_04 A1/A2). Each doubles an existing rotary pot:
+// fader_left pairs with Nose Basket (ADS_03 A1), fader_right with the IRIS
+// pot on j4_display_right. See dualPick() for the arbitration.
+int fader_left_value  = 0;
+int fader_right_value = 0;
 
 // Middle face pots (0-255, mapped to PCA9685 servo channels on j4_receiver)
 int eyebrow_l_value     = 0;  // ADS_01 A0
@@ -566,6 +594,42 @@ int processPot(int raw, int out_max) {
   return map(raw, 0, 17000, 0, out_max);
 }
 
+// Dual-control arbitration: two pots drive one function (rotary + fader) and
+// must never fight. Whichever control moved last (by more than the claim
+// threshold, on the processPot 0-255 scale) becomes the active source and
+// its value is used until the other one moves. A source that is not ok
+// (module unplugged, display feed down) cannot claim or hold active status.
+// First sighting of a source only baselines it -- it has to actually MOVE
+// to claim, so power-up doesn't randomly hand control to a fader.
+#define DUAL_CLAIM_COUNTS 4   // ~1.5% of travel; above ADS1115 pot noise
+
+struct DualPot {
+  int  lastA, lastB;    // last seen values (-1 = not seen yet)
+  bool bActive;         // true = source B (the fader) is active
+};
+DualPot dual_iris        = { -1, -1, false };
+DualPot dual_nose_basket = { -1, -1, false };
+
+int dualPick(DualPot &d, int a, bool aOk, int b, bool bOk) {
+  if (aOk) {
+    if (d.lastA < 0) d.lastA = a;                              // baseline only
+    else if (abs(a - d.lastA) >= DUAL_CLAIM_COUNTS) d.bActive = false;
+    d.lastA = a;
+  } else {
+    d.lastA = -1;
+  }
+  if (bOk) {
+    if (d.lastB < 0) d.lastB = b;                              // baseline only
+    else if (abs(b - d.lastB) >= DUAL_CLAIM_COUNTS) d.bActive = true;
+    d.lastB = b;
+  } else {
+    d.lastB = -1;
+  }
+  if (d.bActive && !bOk) d.bActive = false;   // active source vanished
+  if (!d.bActive && !aOk && bOk) d.bActive = true;
+  return d.bActive ? b : a;
+}
+
 // I2C presence guards. Two traps when a device is missing:
 //  1. The ADS1X15 library's readADC() has NO timeout: with no chip on the
 //     bus, isBusy() never clears and readADC() spins forever, freezing
@@ -669,7 +733,7 @@ void setup() {
   adsReady(adsg_01);
   adsReady(adsg_02);
   adsReady(adsg_03);
-  adsReady(adsg_04);  // all four channels spare -- not yet read
+  adsReady(adsg_04);  // A0 neck-pivot, A1 fader_left, A2 fader_right, A3 spare
 
   // Panel toggles: switch closes to GND, so ON reads LOW
   pinMode(LASER_TOGGLE_PIN,   INPUT_PULLUP);
@@ -813,7 +877,8 @@ void loop() {
     eyes_x_value = eyes_y_value = 0;
     neck_value   = jaw_value    = 1600;   // joystick centre, not hard-over
   }
-  if (adsReady(adsg_03)) {
+  bool ads3_ok = adsReady(adsg_03);
+  if (ads3_ok) {
     nose_value          = processPot(ADS_03.readADC(0), 255);  // Nose (up/down)
     nose_basket_value   = processPot(ADS_03.readADC(1), 255);  // Nose Basket (up/down)
     eyelid_l_value      = processPot(ADS_03.readADC(2), 255);  // Bottom Eyelid L
@@ -821,11 +886,27 @@ void loop() {
   } else {
     nose_value = nose_basket_value = eyelid_l_value = eyelid_r_value = 0;
   }
+  bool ads4_ok = adsReady(adsg_04);
+  if (ads4_ok) {
+    neck_pivot_value  = processPot(ADS_04.readADC(0), 3200);  // neck-pivot pot
+    fader_left_value  = processPot(ADS_04.readADC(1), 255);   // fader_left  -> Nose Basket
+    fader_right_value = processPot(ADS_04.readADC(2), 255);   // fader_right -> iris
+  } else {
+    neck_pivot_value = 1600;   // hold centre (matches the receiver's old placeholder)
+    fader_left_value = fader_right_value = 0;
+  }
   // Remote pots from j4_display_right (same raw scale -> same processPot)
+  bool dispR_ok    = (millis() - lastDisplayRMs < DISPLAY_TIMEOUT_MS);
   iris_value       = processPot(dispR_iris_raw, 255);
   color_value      = processPot(dispR_color_raw, 255);
   brightness_value = processPot(dispR_brightness_raw, 255);
   volume_value     = processPot(dispR_volume_raw, 100);
+  // Dual-control arbitration: iris = IRIS pot vs fader_right, Nose Basket =
+  // rotary pot vs fader_left. Last mover wins; see dualPick().
+  iris_value        = dualPick(dual_iris, iris_value, dispR_ok,
+                               fader_right_value, ads4_ok);
+  nose_basket_value = dualPick(dual_nose_basket, nose_basket_value, ads3_ok,
+                               fader_left_value, ads4_ok);
   // --- END ADC READS ---
 
   // Panel toggles: INPUT_PULLUP, switch closes to GND, so ON = LOW
@@ -852,6 +933,7 @@ void loop() {
   xmitData.eye_pop_xmit     = eye_pop_value;
   xmitData.neck_left_xmit   = neck_left_value;
   xmitData.neck_right_xmit  = neck_right_value;
+  xmitData.neck_pivot_xmit  = neck_pivot_value;
   xmitData.eyebrow_l_xmit     = eyebrow_l_value;
   xmitData.eyebrow_r_xmit     = eyebrow_r_value;
   xmitData.basket_brow_l_xmit = basket_brow_l_value;

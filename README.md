@@ -84,6 +84,70 @@ I2C SDA (ADS x4 + keypad) -- 21 |             |  5V
 
 ESP-NOW (wireless) links this board to j4_receiver.
 
+## ADS1115 pin diagrams
+
+All four modules share the TTGO's I2C bus (SDA = GPIO 21, SCL = GPIO 22,
+3.3V, GND); only the ADDR strap and the four analog channels differ. Every
+pot's wiper goes to its A-pin; the outer legs go to 3.3V and GND.
+
+```
+ADS_01 @ 0x48 (ADDR -> GND)                 four face pots, left bank
++------+
+| VDD  |  3.3V
+| GND  |  GND
+| SCL  |  TTGO GPIO 22 (I2C SCL)
+| SDA  |  TTGO GPIO 21 (I2C SDA)
+| ADDR |  GND  = address 0x48
+| ALRT |  not connected
+| A0   |  Eyebrow L pot wiper          -> PCA9685 ch 6
+| A1   |  Eyebrow R pot wiper          -> PCA9685 ch 7
+| A2   |  Basket Eyebrow L pot wiper   -> PCA9685 ch 8
+| A3   |  Basket Eyebrow R pot wiper   -> PCA9685 ch 9
++------+
+
+ADS_02 @ 0x49 (ADDR -> VDD)                 both joysticks
++------+
+| VDD  |  3.3V
+| GND  |  GND
+| SCL  |  TTGO GPIO 22 (I2C SCL)
+| SDA  |  TTGO GPIO 21 (I2C SDA)
+| ADDR |  VDD  = address 0x49
+| ALRT |  not connected
+| A0   |  eyes joystick X wiper        -> eyes pan servo  (PCA9685 ch 3)
+| A1   |  eyes joystick Y wiper        -> eyes tilt servo (PCA9685 ch 4)
+| A2   |  neck joystick X wiper        -> neck L/R differential mix
+| A3   |  neck joystick Y (jaw) wiper  -> neck L/R base height
++------+
+
+ADS_03 @ 0x4A (ADDR -> SDA)                 four face pots, right bank
++------+
+| VDD  |  3.3V
+| GND  |  GND
+| SCL  |  TTGO GPIO 22 (I2C SCL)
+| SDA  |  TTGO GPIO 21 (I2C SDA)
+| ADDR |  SDA  = address 0x4A
+| ALRT |  not connected
+| A0   |  Nose pot wiper (up/down)     -> PCA9685 ch 10
+| A1   |  Nose Basket pot wiper        -> PCA9685 ch 11
+| A2   |  Bottom Eyelid L pot wiper    -> PCA9685 ch 12
+| A3   |  Bottom Eyelid R pot wiper    -> PCA9685 ch 13
++------+
+
+ADS_04 @ 0x4B (ADDR -> SCL)                 neck-pivot + linear faders
++------+
+| VDD  |  3.3V
+| GND  |  GND
+| SCL  |  TTGO GPIO 22 (I2C SCL)
+| SDA  |  TTGO GPIO 21 (I2C SDA)
+| ADDR |  SCL  = address 0x4B
+| ALRT |  not connected
+| A0   |  neck-pivot pot wiper         -> nP on the stepper link (0-3200)
+| A1   |  fader_left wiper             -> Nose Basket (doubles ADS_03 A1)
+| A2   |  fader_right wiper            -> iris (doubles j4_display_right IRIS)
+| A3   |  spare
++------+
+```
+
 ## Analog inputs
 
 Local, on the four ADS1115 modules over I2C:
@@ -102,9 +166,14 @@ Local, on the four ADS1115 modules over I2C:
 | ADS_03 (0x4A) | A1 | Nose Basket pot (up/down) |
 | ADS_03 (0x4A) | A2 | Bottom Eyelid L pot |
 | ADS_03 (0x4A) | A3 | Bottom Eyelid R pot |
-| ADS_04 (0x4B) | A0-A3 | Free (future pots: neck-pivot, spares) |
+| ADS_04 (0x4B) | A0 | Neck-pivot pot (silver knob below j4_display_left, 0-3200) |
+| ADS_04 (0x4B) | A1 | fader_left (linear fader, doubles the Nose Basket pot) |
+| ADS_04 (0x4B) | A2 | fader_right (linear fader, doubles the IRIS pot) |
+| ADS_04 (0x4B) | A3 | Spare |
 
-The eight face pots ride the ESP-NOW control packet to PCA9685 channels 6-13 on j4_receiver (Eyebrow L/R = ch 6/7, Basket Eyebrow L/R = ch 8/9, Nose = ch 10, Nose Basket = ch 11, Bottom Eyelid L/R = ch 12/13).
+The eight face pots ride the ESP-NOW control packet to PCA9685 channels 6-13 on j4_receiver (Eyebrow L/R = ch 6/7, Basket Eyebrow L/R = ch 8/9, Nose = ch 10, Nose Basket = ch 11, Bottom Eyelid L/R = ch 12/13). The neck-pivot pot rides the packet in its own field and leaves the receiver as the `nP` slot of the stepper stream.
+
+The two linear faders each double an existing rotary pot, arbitrated last-mover-wins: whichever control of the pair moved last (beyond a small claim threshold) is the active source and its value is used, so the two never fight. fader_right pairs with the IRIS pot on j4_display_right; fader_left pairs with the Nose Basket pot. A source that is absent (module unplugged, display feed down) can neither claim nor hold active status.
 
 Remote, streamed from j4_display_right's dedicated ADS1115 (raw counts over Serial2, scaled here with the same `processPot()`):
 
