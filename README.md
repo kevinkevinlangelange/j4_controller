@@ -1,6 +1,6 @@
 # j4_controller
 
-Firmware for the **Johnny 4 robot controller/transmitter**. Runs on a LILYGO TTGO T-Display v1.1 (ESP32). Reads potentiometers and a 4x4 keypad, ingests four more pots from the j4_display_right board, transmits control data to the robot receiver over ESP-NOW, and mirrors live data to the two XIAO display boards over UART.
+Firmware for the **Johnny 4 robot controller/transmitter**. Runs on a LILYGO TTGO T-Display v1.1 (ESP32). Reads potentiometers and two 4x4 keypads, ingests four more pots from the j4_display_right board, transmits control data to the robot receiver over ESP-NOW, and mirrors live data to the two XIAO display boards over UART.
 
 ## What is Johnny 4?
 
@@ -8,11 +8,12 @@ Johnny 4 is a prop robot controlled wirelessly. This board is the handheld contr
 
 ## What this firmware does
 
-- Reads analog potentiometers via four local ADS1115 ADC modules: the eyes joystick (eyes_x / eyes_y), the neck joystick (neck X / jaw Y), and the eight middle face pots (Eyebrow L/R, Basket Eyebrow L/R, Nose, Nose Basket, Bottom Eyelid L/R); the fourth module's channels are spares for future pots (neck-pivot etc.)
+- Reads analog potentiometers via four local ADS1115 ADC modules: the eyes joystick (eyes_x / eyes_y), the neck joystick (neck X / jaw Y), and the eight middle face pots (Eyebrow L/R, Basket Eyebrow L/R, Nose, Nose Basket, Bottom Eyelid L/R); the fourth module carries the neck-pivot pot and the two linear faders
 - Reads the four panel toggle switches (LASER, VENT, EYE POP, and the AUX toggle by the right joystick) on GPIOs 32/33/13/15 with internal pull-ups
 - Ingests four more pots (iris, color, brightness, volume) from [j4_display_right](https://github.com/kevinkevinlangelange/j4_display_right)'s dedicated ADS1115 over Serial2 as 25 Hz `P:` lines
-- Reads a 4x4 matrix keypad via PCF8574 I2C expander using a custom scan routine
-- Supports jukebox-style audio phrase selection: press a letter (A-D) then a digit (0-9) to queue a phrase, or press a digit alone to queue a 0x phrase (e.g. pressing 8 queues "08.wav")
+- Reads two 4x4 matrix keypads via PCF8574 I2C expanders using a custom scan routine
+- Left keypad: jukebox-style audio phrase selection: press a letter (A-D) then a digit (0-9) to queue a phrase, or press a digit alone to queue a 0x phrase (e.g. pressing 8 queues "08.wav")
+- Right keypad: face presets. Tap a key to recall its saved face; hold a key 3 seconds to save the current face to it (j4_display_right shows a confirm prompt, * confirms). Faces persist on j4_talk's microSD and are re-loaded in the background whenever the talk link is up
 - Press `*` to send a STOP command, press `#` to clear the buffer
 - Mixes the joystick into differential neck-left / neck-right values over a 0-3200 range
 - Transmits all control data to the robot receiver via ESP-NOW (fixed-size packed structs, no `String` members so they survive the wireless `memcpy`)
@@ -31,7 +32,7 @@ Johnny 4 is a prop robot controlled wirelessly. This board is the handheld contr
 | ADC modules | Four ADS1115 (I2C addresses 0x48, 0x49, 0x4A, 0x4B); a fifth lives on j4_display_right |
 | Toggle switches | LASER, VENT, EYE POP, AUX -- GPIOs 32/33/13/15, INPUT_PULLUP, switch closes to GND |
 | Keypad expanders | Two PCF8574 I2C I/O expanders: 0x21 (keypad_left, A0 jumper high) and 0x20 (keypad_right) |
-| Keypads | Two 4x4 matrix keypads, headers soldered directly into P0-P7; both currently drive the same phrase-select logic |
+| Keypads | Two 4x4 matrix keypads, headers soldered directly into P0-P7; left = phrase select, right = face presets |
 | Displays | j4_display_left (jukebox, Serial1) + j4_display_right (pot labels, Serial2) |
 
 ## Pin assignments
@@ -42,7 +43,7 @@ Johnny 4 is a prop robot controlled wirelessly. This board is the handheld contr
 | 22 | I2C SCL |
 | 17 | Serial1 TX to j4_display_left (XIAO D7) |
 | 27 | Serial1 RX from j4_display_left (XIAO D6) |
-| 25 | Serial2 TX to j4_display_right (XIAO D7, reserved) |
+| 25 | Serial2 TX to j4_display_right (XIAO D7, face-preset messages) |
 | 26 | Serial2 RX from j4_display_right (XIAO D6, pot feed) |
 | 32 | LASER toggle (INPUT_PULLUP, switch closes to GND) |
 | 33 | VENT toggle (INPUT_PULLUP, switch closes to GND) |
@@ -66,7 +67,7 @@ I2C SDA (ADS x4 + keypad) -- 21 |             |  5V
                   I2C SCL -- 22 |             |  GND  ground
      DISP-L TX -> XIAO D7 -- 17 |     TTGO    |  27   DISP-L RX <- XIAO D6
                    (free) -- 2  |  T-Display  |  26   DISP-R RX <- XIAO D6
-               AUX toggle -- 15 |     v1.1    |  25   DISP-R TX (reserved)
+               AUX toggle -- 15 |     v1.1    |  25   DISP-R TX (face msgs)
            EYE POP toggle -- 13 |             |  33   VENT toggle
       (avoid: boot/flash) -- 12 |   [ ST7789  |  32   LASER toggle
                    ground -- GND|    TFT on   |  39   (input only)
@@ -204,7 +205,7 @@ Two 4x4 keypads, each on its own PCF8574 backpack on the shared I2C bus:
 - **keypad_left** (the newer keypad, left of the panel) at **0x21** -- set the backpack's A0 jumper high. If that backpack turns out to be a PCF8574**A**, the same jumper lands at 0x39; change the two `0x21`s in `main.cpp`.
 - **keypad_right** (the original keypad) at **0x20** -- all jumpers low.
 
-Both keypads currently drive the same phrase-select logic; they are scanned left-first, one key per pass, and each can be absent or hot-plugged without affecting the other. Each has its own keymap string (`keymap_left` starts as a copy of `keymap_right`; if the new model's matrix ordering differs, re-derive just that string by pressing each key and rearranging).
+The left keypad drives phrase select; the right keypad drives face presets (tap = recall, 3s hold = save prompt, * confirms). Each can be absent or hot-plugged without affecting the other. Each has its own keymap string (`keymap_left` starts as a copy of `keymap_right`; if the new model's matrix ordering differs, re-derive just that string by pressing each key and rearranging).
 
 Each keypad is plugged straight into its PCF8574 P0-P7 (keypad pin 1 into P0, in order). The I2CKeyPad library's fixed scan pattern does not match this wiring, so the firmware uses a custom scan via the PCF8574 library directly.
 
@@ -222,6 +223,23 @@ Actual pin-to-wire mapping (derived on the original keypad):
 | P7 | Column 4 (A, B, C, D) |
 
 The scanner drives P0, P1, P2, P7 one at a time LOW and reads P3, P4, P5, P6.
+
+## Face presets
+
+A **face** is a snapshot of the robot's facial expression: iris, eye color, eye brightness, the eight middle face pots, and the LASER / VENT / EYE POP toggle states. Volume, the neck values, and eyes X/Y are deliberately not part of a face.
+
+On the **right keypad**:
+
+- **Tap a key**: recall that key's saved face. Every face channel jumps to the saved value and holds there; turning any face pot takes just that channel back (frozen-baseline takeover, so even a slow turn works), and flipping a toggle takes that toggle back. The rest of the face stays put.
+- **Hold a key for 3 seconds** (any key except `*`): j4_display_right shows "SAVE FACE ON `<key>`? PRESS * TO CONFIRM". `*` saves, any other key cancels, and an unanswered prompt times out after 10 seconds.
+
+Faces persist in `FACES.TXT` on j4_talk's microSD, so they survive power-off. The sync is fully background and never blocks anything:
+
+- After boot (or whenever the talk link appears) this board re-requests the saved-face dump every 2.5s until a complete one lands.
+- A save made while j4_talk is offline stays in RAM flagged dirty ("PENDING SD" on the display) and is pushed automatically when the link comes up; the display shows "FACE `<key>` ON SD" when the Teensy confirms the write.
+- If the Teensy reports an SD write failure, the face stays usable in RAM for the session and auto-retry stops until it is re-saved.
+
+Slots are keyed by the keypad **character**, so re-deriving a keymap keeps every saved face on the same printed key. 15 keys are usable as slots (`*` is the confirm key). Face traffic is its own ESP-NOW packet type (0x04) translated by j4_receiver to text lines on the Teensy UART; see those repos for the protocol.
 
 ## Dependencies
 

@@ -15,7 +15,8 @@
 //     last updated:  2026-07-04 -- CDT
 //     last updated:  2026-07-08 -- CDT
 //     last updated:  2026-07-12 -- CDT
-//     version increment:  20260712--004
+//     last updated:  2026-07-14 -- CDT
+//     version increment:  20260714--005
 //
 //
 //           author:  Kevin Lange
@@ -176,6 +177,36 @@
 //                            never fight. A source that is absent (module
 //                            unplugged, display feed down) can neither claim
 //                            nor hold active status.
+//                 v0_6_22 -- FACE PRESETS. The right keypad stops doubling the
+//                            phrase-select pad and becomes the face keypad:
+//                            hold any key (except *) for 3s and j4_display_right
+//                            asks "SAVE FACE ON <key>? PRESS * TO CONFIRM"
+//                            (any other key cancels, 10s timeout). Confirming
+//                            snapshots the current face (iris, color,
+//                            brightness, the 8 face pots, and the LASER/VENT/
+//                            EYE POP toggle states -- no volume, no neck, no
+//                            eyes X/Y) into a 16-slot RAM table keyed by the
+//                            keypad character, and pushes it through
+//                            j4_receiver to j4_talk, which persists it in
+//                            FACES.TXT on its microSD. Tapping a key recalls
+//                            its face: a preset overlay holds every face
+//                            channel at the recalled value until that
+//                            channel's own physical control moves (frozen-
+//                            baseline takeover, DUAL_CLAIM_COUNTS), and each
+//                            toggle until its switch is flipped. On boot (or
+//                            whenever the talk link appears) the controller
+//                            re-requests the saved-face dump in the
+//                            background until it has it; saves made while
+//                            talk is offline stay in RAM flagged dirty and
+//                            auto-sync when the link comes up. All of it is
+//                            timer-driven ESP-NOW packet type 0x04 traffic --
+//                            no board ever blocks or waits at boot for any
+//                            of this. dualPick() baselines now freeze while
+//                            a source is inactive so a slowly-moved control
+//                            can still accumulate enough travel to claim.
+//                            The controller now also talks TO j4_display_right
+//                            (Serial2 TX GPIO 25, previously reserved):
+//                            "M:<line1>|<line2>" shows a message, "X:" clears.
 //
 //
 //
@@ -203,7 +234,7 @@
 //
 //       23:  TFT RST              [USED BY TTGO]
 //
-//       25:  DISPLAY-R TX  →  right XIAO D7 / GPIO44  (Serial2, reserved)
+//       25:  DISPLAY-R TX  →  right XIAO D7 / GPIO44  (Serial2, face messages)
 //       26:  DISPLAY-R RX  ←  right XIAO D6 / GPIO43  (Serial2, pot feed)
 //       27:  DISPLAY-L RX  ←  left XIAO D6 / GPIO43   (Serial1)
 //
@@ -222,7 +253,7 @@
 //        TTGO GPIO17  →  XIAO D7 (GPIO44)    TTGO TX → XIAO RX
 //        TTGO GPIO27  ←  XIAO D6 (GPIO43)    TTGO RX ← XIAO TX
 //      j4_display_right (Serial2):
-//        TTGO GPIO25  →  XIAO D7 (GPIO44)    TTGO TX → XIAO RX (reserved)
+//        TTGO GPIO25  →  XIAO D7 (GPIO44)    TTGO TX → XIAO RX (face messages)
 //        TTGO GPIO26  ←  XIAO D6 (GPIO43)    TTGO RX ← XIAO TX (pot feed)
 //      TTGO GND  -  both XIAO GNDs
 //      ------------------------------------------------------------------
@@ -363,6 +394,27 @@ typedef struct __attribute__((packed)) {
 #define ESPNOW_PKT_CONTROL  0x01  // controller -> receiver (sticks, pots, phrase select)
 #define ESPNOW_PKT_FILELIST 0x02  // receiver -> controller (file list chunk)
 #define ESPNOW_PKT_STATUS   0x03  // receiver -> controller (now playing, batteries)
+#define ESPNOW_PKT_FACE     0x04  // face presets, both directions (op says which)
+
+// Face packet ops (espnow_face_pkt_t.op). The receiver translates these
+// to/from text lines on the Teensy UART; this struct MUST stay byte-identical
+// with j4_receiver's copy.
+#define FACE_OP_SAVE 1  // controller -> receiver: write this face to the SD
+#define FACE_OP_REQ  2  // controller -> receiver: send me the saved-face dump
+#define FACE_OP_DATA 3  // receiver -> controller: one saved face from the dump
+#define FACE_OP_END  4  // receiver -> controller: dump complete, v[0] = count
+#define FACE_OP_ACK  5  // receiver -> controller: Teensy wrote the slot to SD
+#define FACE_OP_ERR  6  // receiver -> controller: Teensy SD write failed
+
+#define FACE_VALUES 11  // iris, color, brightness, the 8 face pots (FI_* order)
+
+typedef struct __attribute__((packed)) {
+  uint8_t pkt_type;          // ESPNOW_PKT_FACE
+  uint8_t op;                // FACE_OP_*
+  uint8_t key;               // keypad character ('0'-'9','A'-'D','#'); 0 = unused
+  uint8_t toggles;           // bit 0 LASER, 1 VENT, 2 EYE POP
+  int16_t v[FACE_VALUES];
+} espnow_face_pkt_t;
 
 typedef struct __attribute__((packed)) {
   uint8_t pkt_type;
@@ -516,6 +568,66 @@ String xiaoRSerialBuf    = "";
 uint16_t bat1_mv = 0;
 
 
+// --- FACE PRESETS ---
+// A face is the 11 pot channels below plus the LASER/VENT/EYE POP toggle
+// states. No volume, no neck, no eyes X/Y. Slots are keyed by the keypad
+// CHARACTER (not the scan code) so a re-derived keymap keeps every saved
+// face on the same printed key. '*' is the confirm key and cannot be a slot.
+enum {
+  FI_IRIS = 0, FI_COLOR, FI_BRIGHT,
+  FI_BROW_L, FI_BROW_R, FI_BBROW_L, FI_BBROW_R,
+  FI_NOSE, FI_NOSE_BASKET, FI_LID_L, FI_LID_R
+};
+
+#define FACE_SLOTS 16
+struct FaceSlot {
+  char    key;         // keypad character, 0 = slot never used
+  bool    valid;       // has data (recallable)
+  bool    dirty;       // not yet confirmed on the Teensy SD
+  bool    sd_failed;   // Teensy reported a write error -- stop auto-retrying
+  int16_t v[FACE_VALUES];
+  uint8_t toggles;     // bit 0 LASER, 1 VENT, 2 EYE POP
+};
+FaceSlot faces[FACE_SLOTS];
+
+bool          faces_synced   = false;  // true once a complete SD dump landed
+uint8_t       faceDumpCount  = 0;      // FACE_OP_DATA packets since last REQ
+unsigned long faceReq_previousMillis   = 0;
+unsigned long faceDirty_previousMillis = 0;
+const unsigned long faceReq_interval   = 2500;  // re-request dump until synced
+const unsigned long faceDirty_interval = 2000;  // push one dirty face per tick
+
+// Preset overlay: a recalled face holds each channel until that channel's own
+// physical control moves (same frozen-baseline takeover as dualPick), and
+// each toggle until its physical switch is flipped.
+int16_t preset_v[FACE_VALUES];
+bool    preset_on[FACE_VALUES] = { false };
+uint8_t preset_toggles     = 0;   // recalled toggle states
+uint8_t preset_toggle_mask = 0;   // bit set = that toggle still preset-driven
+int16_t phys_baseline[FACE_VALUES];
+bool    phys_baseline_init = false;
+uint8_t toggles_phys_last  = 0;
+
+// Right keypad (face keypad) press/hold tracking + save-confirm prompt
+#define FACE_HOLD_MS            3000   // hold this long to open the save prompt
+#define FACE_PROMPT_TIMEOUT_MS 10000   // unanswered prompt cancels itself
+int8_t        rk_down       = -1;     // scan code currently held, -1 = none
+unsigned long rk_down_since = 0;
+bool          rk_hold_fired = false;  // this press already opened the prompt
+bool          rk_consumed   = false;  // this press answered the prompt
+char          face_prompt_key     = 0;   // 0 = no prompt showing
+unsigned long face_prompt_started = 0;
+unsigned long faceMsg_clearAt     = 0;   // 0 = message is not timed
+
+// Incoming face packets: OnDataRecv (WiFi task) only memcpys into this ring;
+// loop() drains it. Single producer / single consumer, volatile indexes.
+#define FACE_RXQ 8
+espnow_face_pkt_t faceRxQ[FACE_RXQ];
+volatile uint8_t  faceRxHead = 0;
+volatile uint8_t  faceRxTail = 0;
+// --- END FACE PRESETS ---
+
+
 // Timers
 unsigned long tft_update_previousMillis = 0;
 unsigned long battery_01_previousMillis = 0;
@@ -611,17 +723,18 @@ DualPot dual_iris        = { -1, -1, false };
 DualPot dual_nose_basket = { -1, -1, false };
 
 int dualPick(DualPot &d, int a, bool aOk, int b, bool bOk) {
+  // The ACTIVE source's baseline tracks its value; the INACTIVE source's
+  // baseline stays frozen where it was released, so even a slow turn
+  // accumulates enough travel to claim (per-cycle deltas never would).
   if (aOk) {
-    if (d.lastA < 0) d.lastA = a;                              // baseline only
-    else if (abs(a - d.lastA) >= DUAL_CLAIM_COUNTS) d.bActive = false;
-    d.lastA = a;
+    if (d.lastA < 0 || !d.bActive) d.lastA = a;   // first sight or active: track
+    else if (abs(a - d.lastA) >= DUAL_CLAIM_COUNTS) { d.bActive = false; d.lastA = a; }
   } else {
     d.lastA = -1;
   }
   if (bOk) {
-    if (d.lastB < 0) d.lastB = b;                              // baseline only
-    else if (abs(b - d.lastB) >= DUAL_CLAIM_COUNTS) d.bActive = true;
-    d.lastB = b;
+    if (d.lastB < 0 || d.bActive) d.lastB = b;    // first sight or active: track
+    else if (abs(b - d.lastB) >= DUAL_CLAIM_COUNTS) { d.bActive = true; d.lastB = b; }
   } else {
     d.lastB = -1;
   }
@@ -713,6 +826,158 @@ bool keypadReady(KeypadGuard &g) {
   g.present = i2cPresent(g.addr);
   return g.present;
 }
+
+
+// --- FACE PRESET HELPERS ---
+
+// The talk chain is usable when the receiver's status packets are fresh AND
+// the receiver reports the Teensy alive. Never a blocking check.
+bool talkLinkUp() {
+  return (millis() - lastStatusRecvMs < STATUS_LINK_TIMEOUT_MS)
+      && rcvData.talk_ok_rcv;
+}
+
+FaceSlot *faceFind(char kc) {
+  for (uint8_t i = 0; i < FACE_SLOTS; i++)
+    if (faces[i].key == kc) return &faces[i];
+  return NULL;
+}
+
+FaceSlot *faceAlloc(char kc) {
+  FaceSlot *f = faceFind(kc);
+  if (f) return f;
+  for (uint8_t i = 0; i < FACE_SLOTS; i++)
+    if (faces[i].key == 0) return &faces[i];
+  return NULL;   // cannot happen: 15 possible keys, 16 slots
+}
+
+// Message on j4_display_right (Serial2 TX). showMs = 0 leaves it up until
+// replaced or cleared; otherwise loop() sends "X:" after showMs. Fire and
+// forget: if the display is unplugged the bytes just fall on the floor, and
+// the display self-clears a stale message after 15s anyway.
+void faceMsg(const char *l1, const char *l2, unsigned long showMs) {
+  Serial2.printf("M:%s|%s\n", l1, l2);
+  faceMsg_clearAt = showMs ? millis() + showMs : 0;
+}
+
+void facePromptOpen(char kc) {
+  face_prompt_key     = kc;
+  face_prompt_started = millis();
+  char l1[24];
+  snprintf(l1, sizeof(l1), "SAVE FACE ON %c?", kc);
+  faceMsg(l1, "PRESS * TO CONFIRM", 0);
+}
+
+void facePromptCancel(const char *why) {
+  face_prompt_key = 0;
+  faceMsg("SAVE CANCELLED", why, 2500);
+}
+
+// Snapshot the CURRENT face -- the effective values (post arbitration and
+// preset overlay), i.e. exactly what the robot's face looks like right now.
+void faceSaveConfirmed() {
+  char kc = face_prompt_key;
+  face_prompt_key = 0;
+  FaceSlot *f = faceAlloc(kc);
+  if (!f) { faceMsg("SAVE FAILED", "NO FREE SLOTS", 2500); return; }
+  f->key       = kc;
+  f->valid     = true;
+  f->dirty     = true;
+  f->sd_failed = false;
+  f->v[FI_IRIS]        = iris_value;
+  f->v[FI_COLOR]       = color_value;
+  f->v[FI_BRIGHT]      = brightness_value;
+  f->v[FI_BROW_L]      = eyebrow_l_value;
+  f->v[FI_BROW_R]      = eyebrow_r_value;
+  f->v[FI_BBROW_L]     = basket_brow_l_value;
+  f->v[FI_BBROW_R]     = basket_brow_r_value;
+  f->v[FI_NOSE]        = nose_value;
+  f->v[FI_NOSE_BASKET] = nose_basket_value;
+  f->v[FI_LID_L]       = eyelid_l_value;
+  f->v[FI_LID_R]       = eyelid_r_value;
+  f->toggles = (laser_toggle   << TOGGLE_BIT_LASER)
+             | (vent_toggle    << TOGGLE_BIT_VENT)
+             | (eye_pop_toggle << TOGGLE_BIT_EYE_POP);
+  char l1[24];
+  snprintf(l1, sizeof(l1), "FACE SAVED ON %c", kc);
+  faceMsg(l1, talkLinkUp() ? "WRITING TO SD..." : "PENDING SD: TALK OFFLINE", 2500);
+}
+
+void faceRecall(char kc) {
+  char l1[24];
+  FaceSlot *f = faceFind(kc);
+  if (!f || !f->valid) {
+    snprintf(l1, sizeof(l1), "NO FACE ON %c", kc);
+    faceMsg(l1, "HOLD 3s TO SAVE ONE", 2500);
+    return;
+  }
+  for (uint8_t i = 0; i < FACE_VALUES; i++) {
+    preset_v[i]  = f->v[i];
+    preset_on[i] = true;
+  }
+  preset_toggles     = f->toggles;
+  preset_toggle_mask = (1 << TOGGLE_BIT_LASER) | (1 << TOGGLE_BIT_VENT)
+                     | (1 << TOGGLE_BIT_EYE_POP);
+  // phys_baseline stops updating while preset_on, so takeover measures total
+  // travel since this exact moment.
+  snprintf(l1, sizeof(l1), "FACE %c RECALLED", kc);
+  faceMsg(l1, "MOVE A POT TO RETAKE IT", 2000);
+}
+
+void faceSendPkt(uint8_t op, const FaceSlot *f) {
+  espnow_face_pkt_t pkt;
+  memset(&pkt, 0, sizeof(pkt));
+  pkt.pkt_type = ESPNOW_PKT_FACE;
+  pkt.op       = op;
+  if (f) {
+    pkt.key     = (uint8_t)f->key;
+    pkt.toggles = f->toggles;
+    memcpy(pkt.v, f->v, sizeof(pkt.v));
+  }
+  esp_now_send(broadcastAddress, (uint8_t *)&pkt, sizeof(pkt));
+}
+
+// Drain face packets staged by OnDataRecv. Runs in loop context only.
+void processFacePackets() {
+  char l1[24];
+  while (faceRxTail != faceRxHead) {
+    espnow_face_pkt_t pkt;
+    memcpy(&pkt, (const void *)&faceRxQ[faceRxTail], sizeof(pkt));
+    faceRxTail = (uint8_t)((faceRxTail + 1) % FACE_RXQ);
+
+    if (pkt.op == FACE_OP_DATA) {
+      faceDumpCount++;
+      FaceSlot *f = faceAlloc((char)pkt.key);
+      // A locally-dirty slot is newer than the SD copy -- keep ours, it will
+      // be pushed by the dirty timer and come back clean.
+      if (f && !f->dirty) {
+        f->key     = (char)pkt.key;
+        f->valid   = true;
+        f->dirty   = false;
+        f->sd_failed = false;
+        f->toggles = pkt.toggles;
+        memcpy(f->v, pkt.v, sizeof(f->v));
+      }
+
+    } else if (pkt.op == FACE_OP_END) {
+      // Complete only if every face in the dump actually landed; otherwise
+      // stay unsynced and the REQ timer asks again (idempotent).
+      faces_synced = (faceDumpCount == (uint8_t)pkt.v[0]);
+
+    } else if (pkt.op == FACE_OP_ACK) {
+      FaceSlot *f = faceFind((char)pkt.key);
+      if (f) f->dirty = false;
+      snprintf(l1, sizeof(l1), "FACE %c ON SD", (char)pkt.key);
+      faceMsg(l1, "", 1500);
+
+    } else if (pkt.op == FACE_OP_ERR) {
+      FaceSlot *f = faceFind((char)pkt.key);
+      if (f) f->sd_failed = true;   // keep valid + dirty, stop auto-retrying
+      faceMsg("SD WRITE FAILED", "FACE KEPT IN CONTROLLER", 3000);
+    }
+  }
+}
+// --- END FACE PRESET HELPERS ---
 
 
 void setup() {
@@ -914,6 +1179,56 @@ void loop() {
   vent_toggle    = (digitalRead(VENT_TOGGLE_PIN)    == LOW);
   eye_pop_toggle = (digitalRead(EYE_POP_TOGGLE_PIN) == LOW);
   aux_toggle     = (digitalRead(AUX_TOGGLE_PIN)     == LOW);
+
+  // --- FACE PRESET OVERLAY ---
+  // A recalled face holds each channel until that channel's own physical
+  // control moves, and each toggle until its switch is flipped. Baselines
+  // only track while no preset holds the channel, so takeover measures
+  // total travel since the recall (a slow turn still gets there).
+  {
+    int16_t phys[FACE_VALUES] = {
+      (int16_t)iris_value, (int16_t)color_value, (int16_t)brightness_value,
+      (int16_t)eyebrow_l_value, (int16_t)eyebrow_r_value,
+      (int16_t)basket_brow_l_value, (int16_t)basket_brow_r_value,
+      (int16_t)nose_value, (int16_t)nose_basket_value,
+      (int16_t)eyelid_l_value, (int16_t)eyelid_r_value
+    };
+    uint8_t tphys = (laser_toggle   << TOGGLE_BIT_LASER)
+                  | (vent_toggle    << TOGGLE_BIT_VENT)
+                  | (eye_pop_toggle << TOGGLE_BIT_EYE_POP);
+    if (!phys_baseline_init) {
+      memcpy(phys_baseline, phys, sizeof(phys_baseline));
+      toggles_phys_last  = tphys;
+      phys_baseline_init = true;
+    }
+    for (uint8_t i = 0; i < FACE_VALUES; i++) {
+      if (preset_on[i] && abs(phys[i] - phys_baseline[i]) >= DUAL_CLAIM_COUNTS)
+        preset_on[i] = false;                     // pot moved: it takes over
+      if (!preset_on[i]) phys_baseline[i] = phys[i];
+    }
+    preset_toggle_mask &= ~(tphys ^ toggles_phys_last);   // flipped = reclaimed
+    toggles_phys_last = tphys;
+
+    if (preset_on[FI_IRIS])        iris_value          = preset_v[FI_IRIS];
+    if (preset_on[FI_COLOR])       color_value         = preset_v[FI_COLOR];
+    if (preset_on[FI_BRIGHT])      brightness_value    = preset_v[FI_BRIGHT];
+    if (preset_on[FI_BROW_L])      eyebrow_l_value     = preset_v[FI_BROW_L];
+    if (preset_on[FI_BROW_R])      eyebrow_r_value     = preset_v[FI_BROW_R];
+    if (preset_on[FI_BBROW_L])     basket_brow_l_value = preset_v[FI_BBROW_L];
+    if (preset_on[FI_BBROW_R])     basket_brow_r_value = preset_v[FI_BBROW_R];
+    if (preset_on[FI_NOSE])        nose_value          = preset_v[FI_NOSE];
+    if (preset_on[FI_NOSE_BASKET]) nose_basket_value   = preset_v[FI_NOSE_BASKET];
+    if (preset_on[FI_LID_L])       eyelid_l_value      = preset_v[FI_LID_L];
+    if (preset_on[FI_LID_R])       eyelid_r_value      = preset_v[FI_LID_R];
+    if (preset_toggle_mask & (1 << TOGGLE_BIT_LASER))
+      laser_toggle   = (preset_toggles >> TOGGLE_BIT_LASER)   & 1;
+    if (preset_toggle_mask & (1 << TOGGLE_BIT_VENT))
+      vent_toggle    = (preset_toggles >> TOGGLE_BIT_VENT)    & 1;
+    if (preset_toggle_mask & (1 << TOGGLE_BIT_EYE_POP))
+      eye_pop_toggle = (preset_toggles >> TOGGLE_BIT_EYE_POP) & 1;
+  }
+  // --- END FACE PRESET OVERLAY ---
+
   eye_pop_value  = eye_pop_toggle ? 3200 : 0;  // popped / normal
 
   // Dead zone: snap joystick axes to center if within threshold
@@ -993,12 +1308,10 @@ void loop() {
   if (currentMillis - keypad_previousMillis >= keypad_interval) {
     keypad_previousMillis = currentMillis;
 
-    // Scan both keypads -- they currently drive the same phrase-select
-    // logic, so the first pad with a key down wins the pass (left priority).
-    KeypadGuard *pads[2] = { &kpg_left, &kpg_right };
-    for (uint8_t p = 0; p < 2; p++) {
-      KeypadGuard &pad = *pads[p];
-      if (!keypadReady(pad) || !kpIsPressed(pad.pcf)) continue;
+    // LEFT keypad -- phrase select (jukebox). The right keypad became the
+    // face keypad in v0_6_22 and is scanned separately below.
+    KeypadGuard &pad = kpg_left;
+    if (keypadReady(pad) && kpIsPressed(pad.pcf)) {
       uint8_t rawKey = kpGetKey(pad.pcf);
 
       if (rawKey <= 15) {  // 16 = NoKey - only promote to global on valid read
@@ -1056,9 +1369,80 @@ void loop() {
         }
       }
       }  // end key <= 15 guard
-      break;   // one key per pass
+    }
+
+    // RIGHT keypad -- FACE PRESETS. Tap = recall that key's face. Hold >= 3s
+    // (any key but '*') = save prompt on j4_display_right; while the prompt
+    // is up, '*' confirms and any other key cancels. Pure state tracking at
+    // the same 150ms scan cadence -- nothing here blocks.
+    bool rk_pressed = keypadReady(kpg_right) && kpIsPressed(kpg_right.pcf);
+    uint8_t rk_raw  = 16;
+    if (rk_pressed) {
+      rk_raw = kpGetKey(kpg_right.pcf);
+      if (rk_raw > 15) rk_pressed = false;   // ghost read -- treat as none
+    }
+    if (rk_pressed) {
+      char kc = kpg_right.keymap[rk_raw];
+      if ((int8_t)rk_raw != rk_down) {       // new key down
+        rk_down       = (int8_t)rk_raw;
+        rk_down_since = currentMillis;
+        rk_hold_fired = false;
+        rk_consumed   = false;
+        last_key_char = kc;
+        if (face_prompt_key) {               // this press answers the prompt
+          rk_consumed = true;
+          if (kc == '*') faceSaveConfirmed();
+          else           facePromptCancel("CANCELLED");
+        }
+      } else if (!rk_hold_fired && !rk_consumed && !face_prompt_key
+                 && currentMillis - rk_down_since >= FACE_HOLD_MS) {
+        rk_hold_fired = true;
+        if (kc != '*') facePromptOpen(kc);   // '*' is confirm-only, never a slot
+      }
+    } else if (rk_down >= 0) {               // key released
+      if (!rk_hold_fired && !rk_consumed && !face_prompt_key
+          && kpg_right.keymap[rk_down] != '*')
+        faceRecall(kpg_right.keymap[rk_down]);
+      rk_down = -1;
     }
   }
+
+  // --- FACE PRESET BACKGROUND WORK (all timer-driven, never blocking) ---
+  processFacePackets();
+
+  if (face_prompt_key && currentMillis - face_prompt_started >= FACE_PROMPT_TIMEOUT_MS)
+    facePromptCancel("TIMED OUT");
+
+  if (faceMsg_clearAt && currentMillis >= faceMsg_clearAt) {
+    faceMsg_clearAt = 0;
+    Serial2.print("X:\n");
+  }
+
+  // Re-request the saved-face dump until a complete one lands. Fires only
+  // while the whole talk chain is up; a robot with no talk board simply
+  // never syncs and everything else keeps working.
+  if (currentMillis - faceReq_previousMillis >= faceReq_interval) {
+    faceReq_previousMillis = currentMillis;
+    if (!faces_synced && talkLinkUp()) {
+      faceDumpCount = 0;
+      faceSendPkt(FACE_OP_REQ, NULL);
+    }
+  }
+
+  // Push one dirty face per tick toward the SD; FACE_OP_ACK clears the flag.
+  // Saves made while talk was offline sync themselves this way.
+  if (currentMillis - faceDirty_previousMillis >= faceDirty_interval) {
+    faceDirty_previousMillis = currentMillis;
+    if (talkLinkUp()) {
+      for (uint8_t i = 0; i < FACE_SLOTS; i++) {
+        if (faces[i].valid && faces[i].dirty && !faces[i].sd_failed) {
+          faceSendPkt(FACE_OP_SAVE, &faces[i]);
+          break;
+        }
+      }
+    }
+  }
+  // --- END FACE PRESET BACKGROUND WORK ---
 
 }
 
@@ -1110,6 +1494,16 @@ void OnDataRecv(const uint8_t *mac, const uint8_t *incomingData, int len) {
   } else if (pkt_type == ESPNOW_PKT_STATUS && len == sizeof(struct_message_rcv)) {
     memcpy(&rcvData, incomingData, sizeof(rcvData));
     lastStatusRecvMs = millis();
+
+  } else if (pkt_type == ESPNOW_PKT_FACE && len == sizeof(espnow_face_pkt_t)) {
+    // memcpy-into-ring only (WiFi task context); loop() drains via
+    // processFacePackets(). A full ring drops the packet -- the REQ/dirty
+    // timers make every face exchange retryable, so nothing is lost for good.
+    uint8_t next = (uint8_t)((faceRxHead + 1) % FACE_RXQ);
+    if (next != faceRxTail) {
+      memcpy((void *)&faceRxQ[faceRxHead], incomingData, sizeof(espnow_face_pkt_t));
+      faceRxHead = next;
+    }
   }
 }
 // --- END ESP-NOW RELATED ---
