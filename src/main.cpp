@@ -16,7 +16,8 @@
 //     last updated:  2026-07-08 -- CDT
 //     last updated:  2026-07-12 -- CDT
 //     last updated:  2026-07-14 -- CDT
-//     version increment:  20260714--005
+//     last updated:  2026-08-21 -- CDT
+//     version increment:  20260821--006
 //
 //
 //           author:  Kevin Lange
@@ -207,6 +208,20 @@
 //                            The controller now also talks TO j4_display_right
 //                            (Serial2 TX GPIO 25, previously reserved):
 //                            "M:<line1>|<line2>" shows a message, "X:" clears.
+//                 v0_6_23 -- Screen-cycle button gains four more pages (still
+//                            wraps: data -> MAC -> status -> ADS_01..ADS_04),
+//                            showing each ADS1115 module's live raw pot
+//                            counts and CONNECTED/DISCONNECTED for bench
+//                            testing without a laptop on the I2C bus. Also
+//                            corrected the README pin diagram: the physical
+//                            header pin order was wrong on one rail (left
+//                            and right rail assignment was fine, but pin
+//                            order top-to-bottom on the left rail was never
+//                            transformed for the 180-degree mounting
+//                            rotation) and two GND pins were missing
+//                            entirely (board is 12+12 pins, diagram only
+//                            showed 11+11); verified against LilyGO's own
+//                            pinout image, not just the schematic.
 //
 //
 //
@@ -325,6 +340,7 @@ void controllerScreenModeDetect();
 void macAddressDisplay();
 void connectionDisplay();
 void drawConnLine(const char *name, bool ok, int row);
+void adsPotsDisplay(int idx);
 void sendToXIAO();
 void sendFileListToXIAO();
 // ------------------------------------------
@@ -503,8 +519,10 @@ unsigned long lastDisplayRMs = 0;
 #define DISPLAY_TIMEOUT_MS  3000
 
 // Screen cycling via the TTGO's built-in button on GPIO 35 (same as j4_receiver).
-// 0 = data, 1 = MAC address, 2 = connection status.
+// 0 = data, 1 = MAC address, 2 = connection status, 3-6 = live ADS1115 pot
+// counts (one screen per module, ADS_01 through ADS_04).
 #define SCREEN_BUTTON  35
+#define NUM_SCREENS    7
 int  screen_mode = 0;
 bool screen_button_prev = HIGH;
 unsigned long screen_button_previousMillis = 0;
@@ -777,6 +795,31 @@ AdsGuard adsg_01(ADS_01, 0x48);
 AdsGuard adsg_02(ADS_02, 0x49);
 AdsGuard adsg_03(ADS_03, 0x4A);
 AdsGuard adsg_04(ADS_04, 0x4B);
+
+// Table driving the four ADS1115 pot-value screens (screen_mode 3-6), one
+// row per module so adsPotsDisplay() doesn't need four near-duplicate
+// functions. A null value pointer (ADS_04 A3, spare) just prints "--".
+struct AdsPotScreen {
+  AdsGuard   &guard;
+  const char *title;
+  const char *labels[4];
+  int        *values[4];
+};
+
+AdsPotScreen adsPotScreens[4] = {
+  { adsg_01, "ADS_01  0x48",
+    { "BROW L", "BROW R", "BBRW L", "BBRW R" },
+    { &eyebrow_l_value, &eyebrow_r_value, &basket_brow_l_value, &basket_brow_r_value } },
+  { adsg_02, "ADS_02  0x49",
+    { "EYES X", "EYES Y", "NECK X", "JAW Y" },
+    { &eyes_x_value, &eyes_y_value, &neck_value, &jaw_value } },
+  { adsg_03, "ADS_03  0x4A",
+    { "NOSE", "NOSE BK", "EYELID L", "EYELID R" },
+    { &nose_value, &nose_basket_value, &eyelid_l_value, &eyelid_r_value } },
+  { adsg_04, "ADS_04  0x4B",
+    { "NECK PIV", "FADER L", "FADER R", "SPARE" },
+    { &neck_pivot_value, &fader_left_value, &fader_right_value, nullptr } },
+};
 
 bool adsReady(AdsGuard &g) {
   if (!g.configured) {   // absent (or never seen): probe only once a second
@@ -1611,24 +1654,27 @@ void tftDisplayUpdate() {
     macAddressDisplay();
   } else if (screen_mode == 2) {
     connectionDisplay();
+  } else {
+    adsPotsDisplay(screen_mode - 3);   // 3-6: ADS_01 .. ADS_04
   }
 }
 
 
-// Cycle screens with the TTGO's built-in GPIO 35 button: data -> MAC -> status.
+// Cycle screens with the TTGO's built-in GPIO 35 button:
+// data -> MAC -> status -> ADS_01 pots -> ADS_02 pots -> ADS_03 pots -> ADS_04 pots.
 void controllerScreenModeDetect() {
   if (millis() - screen_button_previousMillis >= screen_debounce_ms) {
     bool cur = digitalRead(SCREEN_BUTTON);
     if (screen_button_prev == HIGH && cur == LOW) {
-      screen_mode = (screen_mode + 1) % 3;
+      screen_mode = (screen_mode + 1) % NUM_SCREENS;
       if (screen_mode == 0) {
         tft.fillScreen(TFT_BLACK);
         tft.pushImage(0, 0, 135, 37, kevco_labs_logo_02);
         labelsDisplaySprite();
       } else if (screen_mode == 1) {
         macAddressDisplay();
-      } else if (screen_mode == 2) {
-        tft.fillScreen(TFT_BLACK);   // clear once; connectionDisplay() repaints values
+      } else {
+        tft.fillScreen(TFT_BLACK);   // clear once; connectionDisplay()/adsPotsDisplay() repaint values
       }
       screen_button_previousMillis = millis();
     }
@@ -1670,4 +1716,27 @@ void connectionDisplay() {
   drawConnLine("j4_talk",          talkOk,  3);
   drawConnLine("j4_display_left",  dispLOk, 4);
   drawConnLine("j4_display_right", dispROk, 5);
+}
+
+
+// Live raw counts off one ADS1115 module (screen_mode 3-6), for bench
+// testing without needing a laptop on the I2C bus. Module presence reuses
+// the same adsReady() guard the control-tx loop already probes with.
+void adsPotsDisplay(int idx) {
+  AdsPotScreen &s = adsPotScreens[idx];
+  bool ok = adsReady(s.guard);
+
+  tft.setTextColor(TFT_WHITE, TFT_BLACK);
+  tft.drawString(s.title, 6, 10, 2);
+  tft.setTextColor(ok ? TFT_GREEN : TFT_RED, TFT_BLACK);
+  tft.drawString(ok ? "CONNECTED   " : "DISCONNECTED", 6, 30, 2);
+
+  for (int i = 0; i < 4; i++) {
+    int y = 60 + i * 40;
+    tft.setTextColor(TFT_WHITE, TFT_BLACK);
+    tft.drawString(s.labels[i], 0, y, 2);
+    tft.setTextColor(TFT_GREEN, TFT_BLACK);
+    tft.fillRect(70, y, 65, 20, TFT_BLACK);
+    tft.drawString(s.values[i] ? String(*s.values[i]) : "--", 70, y, 2);
+  }
 }

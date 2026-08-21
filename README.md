@@ -20,7 +20,7 @@ Johnny 4 is a prop robot controlled wirelessly. This board is the handheld contr
 - Receives the jukebox file list from the robot receiver in chunks and forwards it to the display board; carries a `need_filelist` flag so the receiver re-sends the list if this board boots late
 - Answers `LIST?` requests from the display board out of its cached copy, so a display reboot recovers the list without a full round trip
 - Displays live pot values, keypress state, and battery voltage on the built-in TFT
-- The TTGO's built-in button (GPIO 35) cycles the TFT through three screens: live data, WiFi MAC address, and a connection-status screen showing ESP-NOW LINK, j4_stepper_neck, j4_stepper_eyes, j4_talk, j4_display_left, and j4_display_right as CONNECTED (green) / DISCONNECTED (red)
+- The TTGO's built-in button (GPIO 35) cycles the TFT through seven screens: live data, WiFi MAC address, a connection-status screen showing ESP-NOW LINK, j4_stepper_neck, j4_stepper_eyes, j4_talk, j4_display_left, and j4_display_right as CONNECTED (green) / DISCONNECTED (red), then four more showing each ADS1115 module's live raw pot counts (ADS_01 through ADS_04) for bench testing without a laptop on the I2C bus
 - Sends a 49-byte binary status packet to the j4_display_left board at 25 fps over UART
 - Shows a STATUS line on the built-in TFT: "ONLINE" when the ESP-NOW link is up and the steppers are healthy, "OFFLINE" if no status packet arrives, or the reported stepper fault (e.g. "NL OT", "EYES OFFLINE"); green when healthy, red on any fault
 
@@ -63,17 +63,18 @@ top-to-bottom as shown.
 ```
             LEFT rail                            RIGHT rail
                                 +--[ USB-C ]--+
-I2C SDA (ADS x4 + keypad) -- 21 |             |  5V
-                  I2C SCL -- 22 |             |  GND  ground
-     DISP-L TX -> XIAO D7 -- 17 |     TTGO    |  27   DISP-L RX <- XIAO D6
-                   (free) -- 2  |  T-Display  |  26   DISP-R RX <- XIAO D6
-               AUX toggle -- 15 |     v1.1    |  25   DISP-R TX (face msgs)
-           EYE POP toggle -- 13 |             |  33   VENT toggle
-      (avoid: boot/flash) -- 12 |   [ ST7789  |  32   LASER toggle
-                   ground -- GND|    TFT on   |  39   (input only)
-                     3.3V -- 3V3|    back ]   |  38   (input only)
-                       5V -- 5V |             |  37   (input only)
+                     3.3V -- 3V3|             |  5V
+                   ground -- GND|             |  GND  ground
+                   ground -- GND|     TTGO    |  27   DISP-L RX <- XIAO D6
+      (avoid: boot/flash) -- 12 |  T-Display  |  26   DISP-R RX <- XIAO D6
+           EYE POP toggle -- 13 |     v1.1    |  25   DISP-R TX (face msgs)
+               AUX toggle -- 15 |             |  33   VENT toggle
+                   (free) -- 2  |   [ ST7789  |  32   LASER toggle
+     DISP-L TX -> XIAO D7 -- 17 |    TFT on   |  39   (input only)
+                  I2C SCL -- 22 |    back ]   |  38   (input only)
+                  I2C SDA -- 21 |             |  37   (input only)
                    ground -- GND|             |  36   (input only)
+                   ground -- GND|             |  3.3V
                                 +-------------+
 
    on-board (no header pin): GPIO34 = battery sense, BOOT = GPIO0,
@@ -82,6 +83,19 @@ I2C SDA (ADS x4 + keypad) -- 21 |             |  5V
        PCF8574 keypad_left @ 0x21, keypad_right @ 0x20
      toggles: INPUT_PULLUP, switch closes to GND (ON = LOW)
 ```
+
+Corrected against LilyGO's own pinout diagram for the T-Display v1.1 (24 pins,
+12 per rail, drawn from the front with the display facing the viewer and
+USB-C at the bottom). Getting from that diagram to this one takes two
+transforms, not one: rotate 180 degrees so USB-C ends up at the top (this
+alone swaps which rail each pin is on *and* reverses top-to-bottom order),
+then mirror left-right because this diagram is drawn from the back (rails
+visible, display facing away) rather than the front (a plain left/right
+swap, order unchanged). Composed, the right rail happens to end up
+identical to where it started; the left rail does not. The previous version
+of this diagram had the left rail's pins in the un-rotated order and was
+missing a GND pin on each rail (11 shown per side against the board's
+actual 12) -- both are fixed above.
 
 ESP-NOW (wireless) links this board to j4_receiver.
 
