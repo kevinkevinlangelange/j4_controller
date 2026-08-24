@@ -106,7 +106,7 @@ All four modules share the TTGO's I2C bus (SDA = GPIO 21, SCL = GPIO 22,
 pot's wiper goes to its A-pin; the outer legs go to 3.3V and GND.
 
 ```
-ADS_01 @ 0x48 (ADDR -> GND)                 four face pots, left bank
+ADS_01 @ 0x48 (ADDR -> GND)                 both joysticks
 +------+
 | VDD  |  3.3V
 | GND  |  GND
@@ -114,13 +114,13 @@ ADS_01 @ 0x48 (ADDR -> GND)                 four face pots, left bank
 | SDA  |  TTGO GPIO 21 (I2C SDA)
 | ADDR |  GND  = address 0x48
 | ALRT |  not connected
-| A0   |  Eyebrow L pot wiper          -> PCA9685 ch 6
-| A1   |  Eyebrow R pot wiper          -> PCA9685 ch 7
-| A2   |  Basket Eyebrow L pot wiper   -> PCA9685 ch 8
-| A3   |  Basket Eyebrow R pot wiper   -> PCA9685 ch 9
+| A0   |  eyes joystick X wiper        -> eyes pan servo  (PCA9685 ch 3)
+| A1   |  eyes joystick Y wiper        -> eyes tilt servo (PCA9685 ch 4)
+| A2   |  neck joystick X wiper        -> neck L/R differential mix
+| A3   |  neck joystick Y (jaw) wiper  -> neck L/R base height
 +------+
 
-ADS_02 @ 0x49 (ADDR -> VDD)                 both joysticks
+ADS_02 @ 0x49 (ADDR -> VDD)                 four face pots, left bank
 +------+
 | VDD  |  3.3V
 | GND  |  GND
@@ -128,10 +128,10 @@ ADS_02 @ 0x49 (ADDR -> VDD)                 both joysticks
 | SDA  |  TTGO GPIO 21 (I2C SDA)
 | ADDR |  VDD  = address 0x49
 | ALRT |  not connected
-| A0   |  eyes joystick X wiper        -> eyes pan servo  (PCA9685 ch 3)
-| A1   |  eyes joystick Y wiper        -> eyes tilt servo (PCA9685 ch 4)
-| A2   |  neck joystick X wiper        -> neck L/R differential mix
-| A3   |  neck joystick Y (jaw) wiper  -> neck L/R base height
+| A0   |  Eyebrow L pot wiper          -> PCA9685 ch 6
+| A1   |  Eyebrow R pot wiper          -> PCA9685 ch 7
+| A2   |  Basket Eyebrow L pot wiper   -> PCA9685 ch 8
+| A3   |  Basket Eyebrow R pot wiper   -> PCA9685 ch 9
 +------+
 
 ADS_03 @ 0x4A (ADDR -> SDA)                 four face pots, right bank
@@ -169,14 +169,14 @@ Local, on the four ADS1115 modules over I2C:
 
 | Module | Channel | Control |
 |--------|---------|---------|
-| ADS_01 (0x48) | A0 | Eyebrow L pot |
-| ADS_01 (0x48) | A1 | Eyebrow R pot |
-| ADS_01 (0x48) | A2 | Basket Eyebrow L pot (was eye-pop, now a toggle) |
-| ADS_01 (0x48) | A3 | Basket Eyebrow R pot |
-| ADS_02 (0x49) | A0 | Eyes joystick X / eyes_x (was left arm) |
-| ADS_02 (0x49) | A1 | Eyes joystick Y / eyes_y (was right arm) |
-| ADS_02 (0x49) | A2 | Neck joystick X |
-| ADS_02 (0x49) | A3 | Neck joystick Y (jaw, feeds neck mixer) |
+| ADS_01 (0x48) | A0 | Eyes joystick X / eyes_x |
+| ADS_01 (0x48) | A1 | Eyes joystick Y / eyes_y |
+| ADS_01 (0x48) | A2 | Neck joystick X |
+| ADS_01 (0x48) | A3 | Neck joystick Y (jaw, feeds neck mixer) |
+| ADS_02 (0x49) | A0 | Eyebrow L pot |
+| ADS_02 (0x49) | A1 | Eyebrow R pot |
+| ADS_02 (0x49) | A2 | Basket Eyebrow L pot (was eye-pop, now a toggle) |
+| ADS_02 (0x49) | A3 | Basket Eyebrow R pot |
 | ADS_03 (0x4A) | A0 | Nose pot (up/down) |
 | ADS_03 (0x4A) | A1 | Nose Basket pot (up/down) |
 | ADS_03 (0x4A) | A2 | Bottom Eyelid L pot |

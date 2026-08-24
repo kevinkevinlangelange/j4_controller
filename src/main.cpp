@@ -17,7 +17,8 @@
 //     last updated:  2026-07-12 -- CDT
 //     last updated:  2026-07-14 -- CDT
 //     last updated:  2026-08-21 -- CDT
-//     version increment:  20260821--006
+//     last updated:  2026-08-23 -- CDT
+//     version increment:  20260823--007
 //
 //
 //           author:  Kevin Lange
@@ -222,6 +223,14 @@
 //                            entirely (board is 12+12 pins, diagram only
 //                            showed 11+11); verified against LilyGO's own
 //                            pinout image, not just the schematic.
+//                 v0_6_24 -- ADS_01 and ADS_02 swap payloads to match a
+//                            rewire: both joysticks (eyes X/Y, neck X/Y)
+//                            now land on ADS_01 (0x48) and the four
+//                            left-bank face pots (Eyebrow L/R, Basket
+//                            Eyebrow L/R) on ADS_02 (0x49). Addresses are
+//                            unchanged -- ADS_01 is still 0x48 and ADS_02
+//                            still 0x49, so no ADDR strap moves; only
+//                            which pot wires land on which module's A0-A3.
 //
 //
 //
@@ -276,14 +285,14 @@
 //      ANALOG INPUTS
 //      ------------------------------------------------------------------
 //      Local, on the four ADS1115 ADCs (I2C):
-//      ADS_01 (0x48) A0:  Eyebrow L pot         -> PCA9685 ch 6
-//      ADS_01 (0x48) A1:  Eyebrow R pot         -> PCA9685 ch 7
-//      ADS_01 (0x48) A2:  Basket Eyebrow L pot  -> PCA9685 ch 8  (was eye-pop pot)
-//      ADS_01 (0x48) A3:  Basket Eyebrow R pot  -> PCA9685 ch 9
-//      ADS_02 (0x49) A0:  eyes joystick X / eyes_x        -> eyes pan servo
-//      ADS_02 (0x49) A1:  eyes joystick Y / eyes_y        -> eyes tilt servo
-//      ADS_02 (0x49) A2:  neck joystick X
-//      ADS_02 (0x49) A3:  neck joystick Y (jaw)  -> mixed into neck-L / neck-R
+//      ADS_01 (0x48) A0:  eyes joystick X / eyes_x        -> eyes pan servo
+//      ADS_01 (0x48) A1:  eyes joystick Y / eyes_y        -> eyes tilt servo
+//      ADS_01 (0x48) A2:  neck joystick X
+//      ADS_01 (0x48) A3:  neck joystick Y (jaw)  -> mixed into neck-L / neck-R
+//      ADS_02 (0x49) A0:  Eyebrow L pot         -> PCA9685 ch 6
+//      ADS_02 (0x49) A1:  Eyebrow R pot         -> PCA9685 ch 7
+//      ADS_02 (0x49) A2:  Basket Eyebrow L pot  -> PCA9685 ch 8
+//      ADS_02 (0x49) A3:  Basket Eyebrow R pot  -> PCA9685 ch 9
 //      ADS_03 (0x4A) A0:  Nose pot (up/down)    -> PCA9685 ch 10
 //      ADS_03 (0x4A) A1:  Nose Basket pot       -> PCA9685 ch 11
 //      ADS_03 (0x4A) A2:  Bottom Eyelid L pot   -> PCA9685 ch 12
@@ -559,10 +568,10 @@ int fader_left_value  = 0;
 int fader_right_value = 0;
 
 // Middle face pots (0-255, mapped to PCA9685 servo channels on j4_receiver)
-int eyebrow_l_value     = 0;  // ADS_01 A0
-int eyebrow_r_value     = 0;  // ADS_01 A1
-int basket_brow_l_value = 0;  // ADS_01 A2
-int basket_brow_r_value = 0;  // ADS_01 A3
+int eyebrow_l_value     = 0;  // ADS_02 A0
+int eyebrow_r_value     = 0;  // ADS_02 A1
+int basket_brow_l_value = 0;  // ADS_02 A2
+int basket_brow_r_value = 0;  // ADS_02 A3
 int nose_value          = 0;  // ADS_03 A0
 int nose_basket_value   = 0;  // ADS_03 A1
 int eyelid_l_value      = 0;  // ADS_03 A2
@@ -808,11 +817,11 @@ struct AdsPotScreen {
 
 AdsPotScreen adsPotScreens[4] = {
   { adsg_01, "ADS_01  0x48",
-    { "BROW L", "BROW R", "BBRW L", "BBRW R" },
-    { &eyebrow_l_value, &eyebrow_r_value, &basket_brow_l_value, &basket_brow_r_value } },
-  { adsg_02, "ADS_02  0x49",
     { "EYES X", "EYES Y", "NECK X", "JAW Y" },
     { &eyes_x_value, &eyes_y_value, &neck_value, &jaw_value } },
+  { adsg_02, "ADS_02  0x49",
+    { "BROW L", "BROW R", "BBRW L", "BBRW R" },
+    { &eyebrow_l_value, &eyebrow_r_value, &basket_brow_l_value, &basket_brow_r_value } },
   { adsg_03, "ADS_03  0x4A",
     { "NOSE", "NOSE BK", "EYELID L", "EYELID R" },
     { &nose_value, &nose_basket_value, &eyelid_l_value, &eyelid_r_value } },
@@ -1169,21 +1178,21 @@ void loop() {
   // Each module is probed before its channels are read: readADC() on an
   // absent chip never returns (see adsReady()). ADS_04 (0x4B) is spare.
   if (adsReady(adsg_01)) {
-    eyebrow_l_value     = processPot(ADS_01.readADC(0), 255);  // Eyebrow L
-    eyebrow_r_value     = processPot(ADS_01.readADC(1), 255);  // Eyebrow R
-    basket_brow_l_value = processPot(ADS_01.readADC(2), 255);  // Basket Eyebrow L (was eye-pop pot)
-    basket_brow_r_value = processPot(ADS_01.readADC(3), 255);  // Basket Eyebrow R
-  } else {
-    eyebrow_l_value = eyebrow_r_value = basket_brow_l_value = basket_brow_r_value = 0;
-  }
-  if (adsReady(adsg_02)) {
-    eyes_x_value    = processPot(ADS_02.readADC(0), 255);   // eyes joystick X (was left-arm pot)
-    eyes_y_value    = processPot(ADS_02.readADC(1), 255);   // eyes joystick Y (was right-arm pot)
-    neck_value      = processPot(ADS_02.readADC(2), 3200);  // joystick X
-    jaw_value       = processPot(ADS_02.readADC(3), 3200);  // joystick Y
+    eyes_x_value    = processPot(ADS_01.readADC(0), 255);   // eyes joystick X
+    eyes_y_value    = processPot(ADS_01.readADC(1), 255);   // eyes joystick Y
+    neck_value      = processPot(ADS_01.readADC(2), 3200);  // neck joystick X
+    jaw_value       = processPot(ADS_01.readADC(3), 3200);  // neck joystick Y
   } else {
     eyes_x_value = eyes_y_value = 0;
     neck_value   = jaw_value    = 1600;   // joystick centre, not hard-over
+  }
+  if (adsReady(adsg_02)) {
+    eyebrow_l_value     = processPot(ADS_02.readADC(0), 255);  // Eyebrow L
+    eyebrow_r_value     = processPot(ADS_02.readADC(1), 255);  // Eyebrow R
+    basket_brow_l_value = processPot(ADS_02.readADC(2), 255);  // Basket Eyebrow L
+    basket_brow_r_value = processPot(ADS_02.readADC(3), 255);  // Basket Eyebrow R
+  } else {
+    eyebrow_l_value = eyebrow_r_value = basket_brow_l_value = basket_brow_r_value = 0;
   }
   bool ads3_ok = adsReady(adsg_03);
   if (ads3_ok) {
