@@ -114,10 +114,10 @@ ADS_01 @ 0x48 (ADDR -> GND)                 both joysticks
 | SDA  |  TTGO GPIO 21 (I2C SDA)
 | ADDR |  GND  = address 0x48
 | ALRT |  not connected
-| A0   |  eyes joystick X wiper        -> eyes pan servo  (PCA9685 ch 3)
-| A1   |  eyes joystick Y wiper        -> eyes tilt servo (PCA9685 ch 4)
-| A2   |  neck joystick X wiper        -> neck L/R differential mix
-| A3   |  neck joystick Y (jaw) wiper  -> neck L/R base height
+| A0   |  neck joystick X wiper        -> neck L/R differential mix
+| A1   |  neck joystick Y (jaw) wiper  -> neck L/R base height
+| A2   |  eyes joystick X wiper        -> eyes pan servo  (PCA9685 ch 3)
+| A3   |  eyes joystick Y wiper        -> eyes tilt servo (PCA9685 ch 4)
 +------+
 
 ADS_02 @ 0x49 (ADDR -> VDD)                 four face pots, left bank
@@ -169,10 +169,10 @@ Local, on the four ADS1115 modules over I2C:
 
 | Module | Channel | Control |
 |--------|---------|---------|
-| ADS_01 (0x48) | A0 | Eyes joystick X / eyes_x |
-| ADS_01 (0x48) | A1 | Eyes joystick Y / eyes_y |
-| ADS_01 (0x48) | A2 | Neck joystick X |
-| ADS_01 (0x48) | A3 | Neck joystick Y (jaw, feeds neck mixer) |
+| ADS_01 (0x48) | A0 | Neck joystick X |
+| ADS_01 (0x48) | A1 | Neck joystick Y (jaw, feeds neck mixer) |
+| ADS_01 (0x48) | A2 | Eyes joystick X / eyes_x |
+| ADS_01 (0x48) | A3 | Eyes joystick Y / eyes_y |
 | ADS_02 (0x49) | A0 | Eyebrow L pot |
 | ADS_02 (0x49) | A1 | Eyebrow R pot |
 | ADS_02 (0x49) | A2 | Basket Eyebrow L pot (was eye-pop, now a toggle) |
