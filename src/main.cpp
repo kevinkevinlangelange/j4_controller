@@ -23,7 +23,8 @@
 //          v0_6_28:  2026-08-29  -KL
 //          v0_6_29:  2026-08-29  -KL
 //          v0_6_30:  2026-08-29  -KL
-//   ver. increment:  20260829--012 (v0_6_30)
+//          v0_6_31:  2026-08-29  -KL
+//   ver. increment:  20260829--013 (v0_6_31)
 //
 //
 //           author:  Kevin Lange
@@ -287,6 +288,30 @@
 //                            touched last rather than a specific one.
 //                            Update-log labels above were shifted +1 to
 //                            match the renumbered header list.
+//                 v0_6_31 -- Neck pivot and fader_left become centre-zero:
+//                            -1600 at minimum, 0 at the midpoint, +1600 at
+//                            maximum, with fader_left inverted so it and
+//                            the pot drive the pivot the same direction.
+//                            processPotCentred() adds the jitter filtering
+//                            a stepper axis needs: a deadband around centre
+//                            (rest = exactly 0, a hard stop, not a small
+//                            standing offset) and hysteresis elsewhere in
+//                            travel (noise below POT_HYSTERESIS cannot
+//                            re-issue a move). Each control keeps its own
+//                            filter state.
+//                            The ESP-NOW field stays 0-3200 absolute and is
+//                            re-centred at transmit: j4_stepper_neck turns
+//                            nP into an ABSOLUTE position (nP/2) homed off
+//                            the MIN limit switch, so signed values on the
+//                            wire would command negative positions and run
+//                            the pivot into that switch. Keeping the wire
+//                            contract also means the receiver and stepper
+//                            need no reflash to match this build.
+//                            dualPick() lost its -1 "not seen yet" sentinel
+//                            for explicit seen flags -- with a centre-zero
+//                            pair, -1 is a real value just left of centre,
+//                            and the sentinel made the pot unable to claim
+//                            back from the fader anywhere in negative travel.
 //
 //
 //
@@ -355,9 +380,11 @@
 //      ADS_03 (0x4A) A2:  Bottom Eyelid L pot   -> PCA9685 ch 12
 //      ADS_03 (0x4A) A3:  Bottom Eyelid R pot   -> PCA9685 ch 13
 //      ADS_04 (0x4B) A0:  neck-pivot pot (silver knob below j4_display_left)
-//                         -> nP on the stepper link, 0-3200
+//                         -> nP on the stepper link. Read centre-zero
+//                         (-1600..0..1600), sent as 0-3200 absolute.
 //      ADS_04 (0x4B) A1:  fader_left  (linear fader) -> neck pivot, shared
-//                         with ADS_04 A0 (last-mover-wins, 0-3200 scale)
+//                         with ADS_04 A0 (last-mover-wins). Same centre-zero
+//                         scale, read INVERTED so both move the pivot alike.
 //      ADS_04 (0x4B) A2:  fader_right (linear fader) -> iris, shared with
 //                         j4_display_right's IRIS pot (last-mover-wins)
 //      ADS_04 (0x4B) A3:  Nose Basket pot       -> PCA9685 ch 11
@@ -553,7 +580,8 @@ typedef struct __attribute__((packed)) struct_message_xmit {
   int16_t eye_pop_xmit;              // eye-pop steppers, 0 or 3200 (EYE POP toggle)
   int16_t neck_left_xmit;
   int16_t neck_right_xmit;
-  int16_t neck_pivot_xmit;           // neck-pivot pot -> nP on the stepper link
+  int16_t neck_pivot_xmit;           // nP on the stepper link, 0-3200 absolute
+                                     // (re-centred from the internal -1600..1600)
   int16_t eyebrow_l_xmit;            // Eyebrow L pot        -> PCA9685 ch 6
   int16_t eyebrow_r_xmit;            // Eyebrow R pot        -> PCA9685 ch 7
   int16_t basket_brow_l_xmit;        // Basket Eyebrow L pot -> PCA9685 ch 8
@@ -617,13 +645,14 @@ int neck_value       = 0;  // joystick X-axis raw
 int jaw_value        = 0;  // joystick Y-axis raw
 int neck_left_value  = 0;
 int neck_right_value = 0;
-int neck_pivot_value = 1600;  // neck-pivot pot (ADS_04 A0); centre if absent
+int neck_pivot_value = 0;     // neck-pivot pot (ADS_04 A0), -1600..0..1600; 0 = centre/stop
 
 // Linear fader pots (ADS_04 A1/A2). Each doubles an existing rotary pot:
-// fader_left pairs with the neck-pivot pot (ADS_04 A0) and so runs on the
-// 0-3200 neck scale, not 0-255; fader_right with the IRIS pot on
-// j4_display_right. See dualPick() for the arbitration.
-int fader_left_value  = 1600;   // neck-pivot scale: centre if absent
+// fader_left pairs with the neck-pivot pot (ADS_04 A0) and so shares its
+// centre-zero -1600..0..1600 scale (and is read inverted, so both controls
+// push the pivot the same direction); fader_right with the IRIS pot on
+// j4_display_right, still 0-255. See dualPick() for the arbitration.
+int fader_left_value  = 0;      // centre-zero: 0 = centre/stop
 int fader_right_value = 0;
 
 // Middle face pots (0-255, mapped to PCA9685 servo channels on j4_receiver)
@@ -827,6 +856,48 @@ int processPot(int raw, int out_max) {
   return map(raw, 0, 17000, 0, out_max);
 }
 
+// Centre-zero pot read: -half .. 0 .. +half instead of 0 .. 2*half, with the
+// jitter suppression a stepper axis needs. A bare mapped ADC value wanders by
+// a few counts even when nothing is touched, and every wander that survives
+// the downstream threshold is a real motor step, so a "stationary" axis buzzes.
+// Two filters, because they solve different halves of the problem:
+//   DEADBAND  -- anything within this of centre reads exactly 0, so a control
+//                left at rest commands a hard stop rather than a small offset.
+//   HYSTERESIS - elsewhere in travel the value only updates once it has moved
+//                this far from the last value we reported, so noise inside the
+//                band cannot re-issue a move. Entering the deadband always
+//                snaps to 0 so coming to rest never strands a small residual.
+// `state` holds the last reported value and MUST be a distinct static/global
+// per control -- sharing one would make the two pots fight over the filter.
+//
+// Unlike processPot() this does NOT treat a low reading as a noise floor.
+// processPot()'s `raw <= 100 -> 0` guard is free on an unsigned scale, where 0
+// is also the bottom of travel, but here 0 is the CENTRE: the same guard would
+// make a pot turned fully to minimum snap to centre instead of -half, losing
+// the bottom of its travel and jumping full-scale at the end stop. A missing
+// module is already caught upstream by adsReady(), and a pivot pot that loses
+// its supply leg reads as minimum and is caught by the axis MIN limit switch.
+// Only the ADC's actual error signature (raw far above the ~17000 full-scale
+// reading) still falls back to centre.
+#define POT_DEADBAND    30   // +/- counts around centre that read as exactly 0
+#define POT_HYSTERESIS  10   // counts of travel needed to report a new value
+
+int processPotCentred(int raw, int half, bool invert, int &state) {
+  int v;
+  if (raw >= 65000) {
+    v = 0;                                  // ADC overflow / error -> centre
+  } else {
+    if (raw < 0)     raw = 0;
+    if (raw > 17000) raw = 17000;
+    v = map(raw, 0, 17000, -half, half);
+    if (invert) v = -v;
+    if (abs(v) < POT_DEADBAND) v = 0;
+  }
+  // Report a new value on a real move, or whenever we land on exact centre.
+  if (abs(v - state) >= POT_HYSTERESIS || (v == 0 && state != 0)) state = v;
+  return state;
+}
+
 // Dual-control arbitration: two pots drive one function (rotary + fader) and
 // must never fight. Whichever control moved last (by more than the pair's
 // claim threshold) becomes the active source and its value is used until the
@@ -839,31 +910,37 @@ int processPot(int raw, int out_max) {
 // it has to be a similar FRACTION of travel on each, or the coarse-scale pair
 // sits inside pot noise and flip-flops. ~1.5% of full travel on both.
 #define DUAL_CLAIM_COUNTS   4   // 0-255 scale (face pots, iris)
-#define DUAL_CLAIM_COUNTS_3200 50   // 0-3200 scale (neck pivot)
+#define DUAL_CLAIM_COUNTS_3200 50   // 3200-count span (neck pivot, -1600..1600)
 
+// "Seen yet" is an explicit flag, not a -1 sentinel in lastA/lastB: the neck
+// pivot pair is centre-zero now, so -1 is an ordinary value just left of
+// centre. With the old sentinel any negative reading looked like a first
+// sighting, and the pot could never claim back from the fader while it sat in
+// the negative half of its travel.
 struct DualPot {
-  int  lastA, lastB;    // last seen values (-1 = not seen yet)
+  int  lastA, lastB;    // last reported value of each source
+  bool seenA, seenB;    // false = not seen since it was last absent
   bool bActive;         // true = source B (the fader) is active
   int  claim;           // movement needed to take over, in this pair's units
 };
-DualPot dual_iris       = { -1, -1, false, DUAL_CLAIM_COUNTS };
-DualPot dual_neck_pivot = { -1, -1, false, DUAL_CLAIM_COUNTS_3200 };
+DualPot dual_iris       = { 0, 0, false, false, false, DUAL_CLAIM_COUNTS };
+DualPot dual_neck_pivot = { 0, 0, false, false, false, DUAL_CLAIM_COUNTS_3200 };
 
 int dualPick(DualPot &d, int a, bool aOk, int b, bool bOk) {
   // The ACTIVE source's baseline tracks its value; the INACTIVE source's
   // baseline stays frozen where it was released, so even a slow turn
   // accumulates enough travel to claim (per-cycle deltas never would).
   if (aOk) {
-    if (d.lastA < 0 || !d.bActive) d.lastA = a;   // first sight or active: track
+    if (!d.seenA || !d.bActive) { d.lastA = a; d.seenA = true; }  // first sight or active: track
     else if (abs(a - d.lastA) >= d.claim) { d.bActive = false; d.lastA = a; }
   } else {
-    d.lastA = -1;
+    d.seenA = false;
   }
   if (bOk) {
-    if (d.lastB < 0 || d.bActive) d.lastB = b;    // first sight or active: track
+    if (!d.seenB || d.bActive) { d.lastB = b; d.seenB = true; }   // first sight or active: track
     else if (abs(b - d.lastB) >= d.claim) { d.bActive = true; d.lastB = b; }
   } else {
-    d.lastB = -1;
+    d.seenB = false;
   }
   if (d.bActive && !bOk) d.bActive = false;   // active source vanished
   if (!d.bActive && !aOk && bOk) d.bActive = true;
@@ -1306,12 +1383,16 @@ void loop() {
   }
   bool ads4_ok = adsReady(adsg_04);
   if (ads4_ok) {
-    neck_pivot_value  = processPot(ADS_04.readADC(0), 3200);  // neck-pivot pot
-    fader_left_value  = processPot(ADS_04.readADC(1), 3200);  // fader_left  -> neck pivot (same 0-3200 scale)
+    // Neck pivot and fader_left are centre-zero (-1600..0..1600) and filtered
+    // for jitter; each needs its own hysteresis state. fader_left is inverted
+    // so pushing it up and turning the pot up drive the pivot the same way.
+    static int np_state = 0, fl_state = 0;
+    neck_pivot_value  = processPotCentred(ADS_04.readADC(0), 1600, false, np_state);
+    fader_left_value  = processPotCentred(ADS_04.readADC(1), 1600, true,  fl_state);
     fader_right_value = processPot(ADS_04.readADC(2), 255);   // fader_right -> iris
     nose_basket_value = processPot(ADS_04.readADC(3), 255);   // Nose Basket (was ADS_03 A1)
   } else {
-    neck_pivot_value = fader_left_value = 1600;   // hold centre (matches the receiver's old placeholder)
+    neck_pivot_value = fader_left_value = 0;   // centre-zero scale: 0 = stop
     fader_right_value = nose_basket_value = 0;
   }
   // Remote pots from j4_display_right (same raw scale -> same processPot)
@@ -1407,7 +1488,13 @@ void loop() {
   xmitData.eye_pop_xmit     = eye_pop_value;
   xmitData.neck_left_xmit   = neck_left_value;
   xmitData.neck_right_xmit  = neck_right_value;
-  xmitData.neck_pivot_xmit  = neck_pivot_value;
+  // neck_pivot is centre-zero (-1600..1600) inside this board, but the wire
+  // format stays the absolute 0-3200 the receiver forwards and j4_stepper_neck
+  // turns into an absolute position (nP/2, homed off the MIN limit switch).
+  // Sending the signed value raw would command negative positions and drive
+  // the pivot into its MIN limit, so re-centre here rather than changing the
+  // packet contract on three boards at once.
+  xmitData.neck_pivot_xmit  = constrain(neck_pivot_value + 1600, 0, 3200);
   xmitData.eyebrow_l_xmit     = eyebrow_l_value;
   xmitData.eyebrow_r_xmit     = eyebrow_r_value;
   xmitData.basket_brow_l_xmit = basket_brow_l_value;

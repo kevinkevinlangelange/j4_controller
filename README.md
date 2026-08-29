@@ -156,8 +156,8 @@ ADS_04 @ 0x4B (ADDR -> SCL)                 neck-pivot + faders + Nose Basket
 | SDA  |  TTGO GPIO 21 (I2C SDA)
 | ADDR |  SCL  = address 0x4B
 | ALRT |  not connected
-| A0   |  neck-pivot pot wiper         -> nP on the stepper link (0-3200)
-| A1   |  fader_left wiper             -> neck pivot (doubles ADS_04 A0, 0-3200)
+| A0   |  neck-pivot pot wiper         -> nP on the stepper link (-1600..0..1600)
+| A1   |  fader_left wiper             -> neck pivot (doubles ADS_04 A0, inverted)
 | A2   |  fader_right wiper            -> iris (doubles j4_display_right IRIS)
 | A3   |  Nose Basket pot wiper        -> PCA9685 ch 11 (single source)
 +------+
@@ -181,16 +181,31 @@ Local, on the four ADS1115 modules over I2C:
 | ADS_03 (0x4A) | A1 | Faulty channel, unused (Nose Basket moved to ADS_04 A3) |
 | ADS_03 (0x4A) | A2 | Bottom Eyelid L pot |
 | ADS_03 (0x4A) | A3 | Bottom Eyelid R pot |
-| ADS_04 (0x4B) | A0 | Neck-pivot pot (silver knob below j4_display_left, 0-3200) |
-| ADS_04 (0x4B) | A1 | fader_left (linear fader, doubles the neck-pivot pot, 0-3200) |
+| ADS_04 (0x4B) | A0 | Neck-pivot pot (silver knob below j4_display_left, -1600..0..1600) |
+| ADS_04 (0x4B) | A1 | fader_left (linear fader, doubles the neck-pivot pot, same scale, read inverted) |
 | ADS_04 (0x4B) | A2 | fader_right (linear fader, doubles the IRIS pot) |
 | ADS_04 (0x4B) | A3 | Nose Basket pot (up/down, single source) |
 
 The eight face pots ride the ESP-NOW control packet to PCA9685 channels 6-13 on j4_receiver (Eyebrow L/R = ch 6/7, Basket Eyebrow L/R = ch 8/9, Nose = ch 10, Nose Basket = ch 11, Bottom Eyelid L/R = ch 12/13). The neck-pivot pot rides the packet in its own field and leaves the receiver as the `nP` slot of the stepper stream.
 
+### Centre-zero controls and jitter filtering
+
+The neck-pivot pot and fader_left are read centre-zero: **-1600 at minimum, 0 at the midpoint, +1600 at maximum**. fader_left is read inverted so that raising the fader and turning the pot drive the pivot the same direction. Everything else stays on its unsigned scale.
+
+`processPotCentred()` filters these two, because an unfiltered ADC value wanders a few counts even when nothing is touched and every wander that survives the downstream threshold is a real motor step:
+
+- **Deadband** (`POT_DEADBAND`, 30 counts): anything within this of centre reads exactly 0, so a control at rest commands a hard stop rather than a small standing offset.
+- **Hysteresis** (`POT_HYSTERESIS`, 10 counts): elsewhere in travel the reported value only updates once it has moved that far from the last reported value, so noise inside the band cannot re-issue a move. Entering the deadband always snaps to 0, so coming to rest never strands a residual.
+
+Measured against +/-8 counts of simulated ADC noise, a control left at rest changes value 0 times at centre and once mid-travel (the initial settle) across 2000 reads, while a slow deliberate sweep from centre to full still resolves ~120 distinct steps.
+
+Unlike `processPot()`, this does not treat a low reading as a noise floor. That guard is free on an unsigned scale where 0 is also the bottom of travel, but here 0 is the centre, so it would make a pot turned fully to minimum snap to centre and lose the bottom of its travel.
+
+**The ESP-NOW field stays 0-3200 absolute** and is re-centred at transmit. j4_stepper_neck turns `nP` into an absolute position (`nP/2`) homed off the MIN limit switch, so signed values on the wire would command negative positions and run the pivot into that switch. Keeping the wire contract also means j4_receiver and j4_stepper_neck need no reflash to match this build.
+
 The two linear faders each double an existing rotary pot, arbitrated last-mover-wins: whichever control of the pair moved last (beyond a small claim threshold) is the active source and its value is used, so the two never fight. fader_right pairs with the IRIS pot on j4_display_right; fader_left pairs with the neck-pivot pot. A source that is absent (module unplugged, display feed down) can neither claim nor hold active status.
 
-The claim threshold is per-pair rather than a single global constant, because the pairs are not on the same scale: the iris pair runs 0-255 and the neck-pivot pair runs 0-3200. A threshold has to be a similar fraction of travel on each (about 1.5%), so it is 4 counts for iris and 50 for neck pivot. A single 4-count threshold would be 0.125% of neck-pivot travel, inside the pots' own noise, and the pair would flip-flop between sources on noise alone.
+The claim threshold is per-pair rather than a single global constant, because the pairs are not on the same scale: the iris pair runs 0-255 and the neck-pivot pair spans 3200 counts (-1600..1600). A threshold has to be a similar fraction of travel on each (about 1.5%), so it is 4 counts for iris and 50 for neck pivot. A single 4-count threshold would be 0.125% of neck-pivot travel, inside the pots' own noise, and the pair would flip-flop between sources on noise alone.
 
 Both halves of the neck-pivot pair (rotary pot on A0, fader on A1) live on ADS_04, so losing that one module drops both sources at once; the value falls back to the 1600 centre rather than to a hard-over endpoint.
 
