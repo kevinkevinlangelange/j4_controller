@@ -20,7 +20,8 @@
 //     last updated:  2026-08-23 -- CDT
 //     last updated:  2026-08-24 -- CDT
 //     last updated:  2026-08-29 -- CDT
-//     version increment:  20260829--009
+//     last updated:  2026-08-29 -- CDT (2)
+//     version increment:  20260829--010
 //
 //
 //           author:  Kevin Lange
@@ -246,6 +247,16 @@
 //                            ads4_ok for both sides and a missing ADS_04
 //                            drops the pair together instead of leaving one
 //                            source live.
+//                 v0_6_27 -- fader_left now doubles the NECK-PIVOT pot
+//                            (ADS_04 A0) instead of Nose Basket, so it is
+//                            read on the 0-3200 neck scale rather than
+//                            0-255. Nose Basket (ADS_04 A3) goes back to
+//                            being a single-source rotary pot. The claim
+//                            threshold had to become per-pair: 4 counts is
+//                            ~1.5% of a 0-255 travel but only 0.125% of a
+//                            0-3200 one, which sits inside pot noise and
+//                            would have made the neck pair flip-flop
+//                            between sources. dual_neck_pivot uses 50.
 //
 //
 //
@@ -315,11 +326,12 @@
 //      ADS_03 (0x4A) A3:  Bottom Eyelid R pot   -> PCA9685 ch 13
 //      ADS_04 (0x4B) A0:  neck-pivot pot (silver knob below j4_display_left)
 //                         -> nP on the stepper link, 0-3200
-//      ADS_04 (0x4B) A1:  fader_left  (linear fader) -> Nose Basket, shared
-//                         with ADS_04 A3 (last-mover-wins)
+//      ADS_04 (0x4B) A1:  fader_left  (linear fader) -> neck pivot, shared
+//                         with ADS_04 A0 (last-mover-wins, 0-3200 scale)
 //      ADS_04 (0x4B) A2:  fader_right (linear fader) -> iris, shared with
 //                         j4_display_right's IRIS pot (last-mover-wins)
 //      ADS_04 (0x4B) A3:  Nose Basket pot       -> PCA9685 ch 11
+//                         (single source; fader_left no longer doubles it)
 //
 //      TOGGLE INPUTS (INPUT_PULLUP, switch closes to GND, ON = LOW):
 //      GPIO 32:  LASER   -> PCA9685 ch 14 servo on j4_receiver
@@ -578,9 +590,10 @@ int neck_right_value = 0;
 int neck_pivot_value = 1600;  // neck-pivot pot (ADS_04 A0); centre if absent
 
 // Linear fader pots (ADS_04 A1/A2). Each doubles an existing rotary pot:
-// fader_left pairs with Nose Basket (ADS_04 A3), fader_right with the IRIS
-// pot on j4_display_right. See dualPick() for the arbitration.
-int fader_left_value  = 0;
+// fader_left pairs with the neck-pivot pot (ADS_04 A0) and so runs on the
+// 0-3200 neck scale, not 0-255; fader_right with the IRIS pot on
+// j4_display_right. See dualPick() for the arbitration.
+int fader_left_value  = 1600;   // neck-pivot scale: centre if absent
 int fader_right_value = 0;
 
 // Middle face pots (0-255, mapped to PCA9685 servo channels on j4_receiver)
@@ -750,20 +763,26 @@ int processPot(int raw, int out_max) {
 }
 
 // Dual-control arbitration: two pots drive one function (rotary + fader) and
-// must never fight. Whichever control moved last (by more than the claim
-// threshold, on the processPot 0-255 scale) becomes the active source and
-// its value is used until the other one moves. A source that is not ok
-// (module unplugged, display feed down) cannot claim or hold active status.
-// First sighting of a source only baselines it -- it has to actually MOVE
-// to claim, so power-up doesn't randomly hand control to a fader.
-#define DUAL_CLAIM_COUNTS 4   // ~1.5% of travel; above ADS1115 pot noise
+// must never fight. Whichever control moved last (by more than the pair's
+// claim threshold) becomes the active source and its value is used until the
+// other one moves. A source that is not ok (module unplugged, display feed
+// down) cannot claim or hold active status. First sighting of a source only
+// baselines it -- it has to actually MOVE to claim, so power-up doesn't
+// randomly hand control to a fader.
+//
+// The threshold is per-pair because the pairs are not all on the same scale:
+// it has to be a similar FRACTION of travel on each, or the coarse-scale pair
+// sits inside pot noise and flip-flops. ~1.5% of full travel on both.
+#define DUAL_CLAIM_COUNTS   4   // 0-255 scale (face pots, iris)
+#define DUAL_CLAIM_COUNTS_3200 50   // 0-3200 scale (neck pivot)
 
 struct DualPot {
   int  lastA, lastB;    // last seen values (-1 = not seen yet)
   bool bActive;         // true = source B (the fader) is active
+  int  claim;           // movement needed to take over, in this pair's units
 };
-DualPot dual_iris        = { -1, -1, false };
-DualPot dual_nose_basket = { -1, -1, false };
+DualPot dual_iris       = { -1, -1, false, DUAL_CLAIM_COUNTS };
+DualPot dual_neck_pivot = { -1, -1, false, DUAL_CLAIM_COUNTS_3200 };
 
 int dualPick(DualPot &d, int a, bool aOk, int b, bool bOk) {
   // The ACTIVE source's baseline tracks its value; the INACTIVE source's
@@ -771,13 +790,13 @@ int dualPick(DualPot &d, int a, bool aOk, int b, bool bOk) {
   // accumulates enough travel to claim (per-cycle deltas never would).
   if (aOk) {
     if (d.lastA < 0 || !d.bActive) d.lastA = a;   // first sight or active: track
-    else if (abs(a - d.lastA) >= DUAL_CLAIM_COUNTS) { d.bActive = false; d.lastA = a; }
+    else if (abs(a - d.lastA) >= d.claim) { d.bActive = false; d.lastA = a; }
   } else {
     d.lastA = -1;
   }
   if (bOk) {
     if (d.lastB < 0 || d.bActive) d.lastB = b;    // first sight or active: track
-    else if (abs(b - d.lastB) >= DUAL_CLAIM_COUNTS) { d.bActive = true; d.lastB = b; }
+    else if (abs(b - d.lastB) >= d.claim) { d.bActive = true; d.lastB = b; }
   } else {
     d.lastB = -1;
   }
@@ -1221,12 +1240,12 @@ void loop() {
   bool ads4_ok = adsReady(adsg_04);
   if (ads4_ok) {
     neck_pivot_value  = processPot(ADS_04.readADC(0), 3200);  // neck-pivot pot
-    fader_left_value  = processPot(ADS_04.readADC(1), 255);   // fader_left  -> Nose Basket
+    fader_left_value  = processPot(ADS_04.readADC(1), 3200);  // fader_left  -> neck pivot (same 0-3200 scale)
     fader_right_value = processPot(ADS_04.readADC(2), 255);   // fader_right -> iris
     nose_basket_value = processPot(ADS_04.readADC(3), 255);   // Nose Basket (was ADS_03 A1)
   } else {
-    neck_pivot_value = 1600;   // hold centre (matches the receiver's old placeholder)
-    fader_left_value = fader_right_value = nose_basket_value = 0;
+    neck_pivot_value = fader_left_value = 1600;   // hold centre (matches the receiver's old placeholder)
+    fader_right_value = nose_basket_value = 0;
   }
   // Remote pots from j4_display_right (same raw scale -> same processPot)
   bool dispR_ok    = (millis() - lastDisplayRMs < DISPLAY_TIMEOUT_MS);
@@ -1234,14 +1253,17 @@ void loop() {
   color_value      = processPot(dispR_color_raw, 255);
   brightness_value = processPot(dispR_brightness_raw, 255);
   volume_value     = processPot(dispR_volume_raw, 100);
-  // Dual-control arbitration: iris = IRIS pot vs fader_right, Nose Basket =
-  // rotary pot vs fader_left. Last mover wins; see dualPick().
+  // Dual-control arbitration: iris = IRIS pot vs fader_right, neck pivot =
+  // neck-pivot pot vs fader_left. Last mover wins; see dualPick().
   iris_value        = dualPick(dual_iris, iris_value, dispR_ok,
                                fader_right_value, ads4_ok);
-  // Both Nose Basket sources now live on ADS_04 (rotary A3, fader A1), so a
-  // missing ADS_04 takes out the pair together rather than one at a time.
-  nose_basket_value = dualPick(dual_nose_basket, nose_basket_value, ads4_ok,
+  // Both neck-pivot sources live on ADS_04 (rotary A0, fader A1), so a
+  // missing ADS_04 takes out the pair together rather than one at a time;
+  // dualPick() then falls through to the pot's own 1600 centre value.
+  neck_pivot_value  = dualPick(dual_neck_pivot, neck_pivot_value, ads4_ok,
                                fader_left_value, ads4_ok);
+  // Nose Basket is single-source again (rotary pot on ADS_04 A3) now that
+  // fader_left drives the neck pivot instead.
   // --- END ADC READS ---
 
   // Panel toggles: INPUT_PULLUP, switch closes to GND, so ON = LOW
