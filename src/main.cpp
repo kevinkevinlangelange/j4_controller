@@ -24,7 +24,8 @@
 //          v0_6_29:  2026-08-29  -KL
 //          v0_6_30:  2026-08-29  -KL
 //          v0_6_31:  2026-08-29  -KL
-//   ver. increment:  20260829--013 (v0_6_31)
+//          v0_6_32:  2026-08-29  -KL
+//   ver. increment:  20260829--014 (v0_6_32)
 //
 //
 //           author:  Kevin Lange
@@ -312,6 +313,32 @@
 //                            pair, -1 is a real value just left of centre,
 //                            and the sentinel made the pot unable to claim
 //                            back from the fader anywhere in negative travel.
+//                 v0_6_32 -- Anti-jitter for the neck joystick axes, which
+//                            matters now the springs are out and the stick
+//                            can sit parked off-centre: a couple of counts
+//                            of ADC noise per axis reached the mixer as a
+//                            couple of counts on neck-L and neck-R, i.e.
+//                            constant physical stepper motion on a joystick
+//                            nobody was touching.
+//                            Filtered at the two axis reads, before the
+//                            mixer -- filtering the mixer outputs instead
+//                            would leave each axis free to jitter into the
+//                            other.
+//                            New stickyBand() replaces the report-on-change
+//                            threshold everywhere, including inside
+//                            processPotCentred(). The old form quantised
+//                            real movement into threshold-sized hops, so a
+//                            slow move counted 10 at a time instead of 1.
+//                            The sticky band instead lets the reported value
+//                            TRAIL the live one by up to `band`, dragged
+//                            rather than snapped: dead still at rest, but
+//                            full 1-count resolution while moving, at the
+//                            cost of `band` counts of lag. That keeps the
+//                            3200-count precision on the neck axes.
+//                            Filter states are globals now, and the read
+//                            block's module-absent branches reset them so a
+//                            returning module is not dragged out of a stale
+//                            value.
 //
 //
 //
@@ -645,6 +672,16 @@ int neck_value       = 0;  // joystick X-axis raw
 int jaw_value        = 0;  // joystick Y-axis raw
 int neck_left_value  = 0;
 int neck_right_value = 0;
+
+// stickyBand() state, one per filtered control. Globals rather than statics
+// inside the read block so the read block's "module absent" branch can reset
+// them: a returning module must not be dragged out of a stale old value.
+// The neck axes are filtered because with the joystick springs removed it can
+// be parked off-centre, where a couple of counts of ADC noise on each axis
+// reaches the mixer as a couple of counts on neck-L and neck-R -- constant
+// physical stepper motion on a joystick nobody is touching.
+int neck_sticky = 1600, jaw_sticky = 1600;   // 0-3200 axes, centre 1600
+int np_sticky   = 0,    fl_sticky  = 0;      // centre-zero controls
 int neck_pivot_value = 0;     // neck-pivot pot (ADS_04 A0), -1600..0..1600; 0 = centre/stop
 
 // Linear fader pots (ADS_04 A1/A2). Each doubles an existing rotary pot:
@@ -861,12 +898,12 @@ int processPot(int raw, int out_max) {
 // a few counts even when nothing is touched, and every wander that survives
 // the downstream threshold is a real motor step, so a "stationary" axis buzzes.
 // Two filters, because they solve different halves of the problem:
-//   DEADBAND  -- anything within this of centre reads exactly 0, so a control
-//                left at rest commands a hard stop rather than a small offset.
-//   HYSTERESIS - elsewhere in travel the value only updates once it has moved
-//                this far from the last value we reported, so noise inside the
-//                band cannot re-issue a move. Entering the deadband always
-//                snaps to 0 so coming to rest never strands a small residual.
+//   DEADBAND    -- anything within this of centre reads exactly 0, so a control
+//                  left at rest commands a hard stop rather than a small offset.
+//   STICKY BAND -- elsewhere in travel, see stickyBand() below: holds still
+//                  against noise but still tracks a slow move one count at a
+//                  time. Entering the deadband always snaps to 0 so coming to
+//                  rest never strands a small residual.
 // `state` holds the last reported value and MUST be a distinct static/global
 // per control -- sharing one would make the two pots fight over the filter.
 //
@@ -880,7 +917,27 @@ int processPot(int raw, int out_max) {
 // Only the ADC's actual error signature (raw far above the ~17000 full-scale
 // reading) still falls back to centre.
 #define POT_DEADBAND    30   // +/- counts around centre that read as exactly 0
-#define POT_HYSTERESIS  10   // counts of travel needed to report a new value
+#define POT_STICKY_BAND  3   // see stickyBand(): noise immunity without quantising
+
+// Sticky band -- kills at-rest jitter WITHOUT costing resolution while moving.
+//
+// The obvious filter ("only report a new value once it has moved N counts,
+// then jump to it") does stop the jitter, but it also quantises real movement
+// into N-sized steps: turn a pot slowly and the output hops N at a time
+// instead of counting. That is unusable on an axis you want to inch.
+//
+// Instead the reported value TRAILS the live one by up to `band` and is
+// dragged along rather than snapped:
+//   at rest   -- noise inside +/-band never moves the report at all. Dead still.
+//   moving    -- the report follows the input one count at a time, staying
+//                `band` behind. Full 1-unit resolution is preserved.
+// The only cost is `band` counts of lag, which on a 3200-count axis is well
+// under a tenth of a percent of travel.
+static inline int stickyBand(int v, int band, int &state) {
+  if      (v - state >  band) state = v - band;
+  else if (v - state < -band) state = v + band;
+  return state;
+}
 
 int processPotCentred(int raw, int half, bool invert, int &state) {
   int v;
@@ -893,8 +950,10 @@ int processPotCentred(int raw, int half, bool invert, int &state) {
     if (invert) v = -v;
     if (abs(v) < POT_DEADBAND) v = 0;
   }
-  // Report a new value on a real move, or whenever we land on exact centre.
-  if (abs(v - state) >= POT_HYSTERESIS || (v == 0 && state != 0)) state = v;
+  // In the deadband, snap to a hard 0. Elsewhere let the sticky band hold it
+  // still at rest while still tracking a slow move count by count.
+  if (v == 0) state = 0;
+  else        stickyBand(v, POT_STICKY_BAND, state);
   return state;
 }
 
@@ -1357,13 +1416,19 @@ void loop() {
   // Each module is probed before its channels are read: readADC() on an
   // absent chip never returns (see adsReady()). ADS_04 (0x4B) is spare.
   if (adsReady(adsg_01)) {
-    neck_value      = processPot(ADS_01.readADC(0), 3200);  // neck joystick X
-    jaw_value       = processPot(ADS_01.readADC(1), 3200);  // neck joystick Y
+    // The two neck axes are sticky-filtered at the source, before the mixer,
+    // so neck-L and neck-R both come out steady. Filtering the mixer outputs
+    // instead would leave each axis free to jitter into the other.
+    neck_value      = stickyBand(processPot(ADS_01.readADC(0), 3200),  // neck joystick X
+                                 POT_STICKY_BAND, neck_sticky);
+    jaw_value       = stickyBand(processPot(ADS_01.readADC(1), 3200),  // neck joystick Y
+                                 POT_STICKY_BAND, jaw_sticky);
     eyes_x_value    = processPot(ADS_01.readADC(2), 255);   // eyes joystick X
     eyes_y_value    = processPot(ADS_01.readADC(3), 255);   // eyes joystick Y
   } else {
     eyes_x_value = eyes_y_value = 0;
     neck_value   = jaw_value    = 1600;   // joystick centre, not hard-over
+    neck_sticky  = jaw_sticky   = 1600;   // reset the filters with them
   }
   if (adsReady(adsg_02)) {
     eyebrow_l_value     = processPot(ADS_02.readADC(0), 255);  // Eyebrow L
@@ -1384,15 +1449,15 @@ void loop() {
   bool ads4_ok = adsReady(adsg_04);
   if (ads4_ok) {
     // Neck pivot and fader_left are centre-zero (-1600..0..1600) and filtered
-    // for jitter; each needs its own hysteresis state. fader_left is inverted
-    // so pushing it up and turning the pot up drive the pivot the same way.
-    static int np_state = 0, fl_state = 0;
-    neck_pivot_value  = processPotCentred(ADS_04.readADC(0), 1600, false, np_state);
-    fader_left_value  = processPotCentred(ADS_04.readADC(1), 1600, true,  fl_state);
+    // for jitter; each needs its own filter state. fader_left is inverted so
+    // pushing it up and turning the pot up drive the pivot the same way.
+    neck_pivot_value  = processPotCentred(ADS_04.readADC(0), 1600, false, np_sticky);
+    fader_left_value  = processPotCentred(ADS_04.readADC(1), 1600, true,  fl_sticky);
     fader_right_value = processPot(ADS_04.readADC(2), 255);   // fader_right -> iris
     nose_basket_value = processPot(ADS_04.readADC(3), 255);   // Nose Basket (was ADS_03 A1)
   } else {
     neck_pivot_value = fader_left_value = 0;   // centre-zero scale: 0 = stop
+    np_sticky        = fl_sticky        = 0;   // reset the filters with them
     fader_right_value = nose_basket_value = 0;
   }
   // Remote pots from j4_display_right (same raw scale -> same processPot)

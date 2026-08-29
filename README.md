@@ -15,7 +15,7 @@ Johnny 4 is a prop robot controlled wirelessly. This board is the handheld contr
 - Left keypad: jukebox-style audio phrase selection: press a letter (A-D) then a digit (0-9) to queue a phrase, or press a digit alone to queue a 0x phrase (e.g. pressing 8 queues "08.wav")
 - Right keypad: face presets. Tap a key to recall its saved face; hold a key 3 seconds to save the current face to it (j4_display_right shows a confirm prompt, * confirms). Faces persist on j4_talk's microSD and are re-loaded in the background whenever the talk link is up
 - Press `*` to send a STOP command, press `#` to clear the buffer
-- Mixes the joystick into differential neck-left / neck-right values over a 0-3200 range
+- Mixes the joystick into differential neck-left / neck-right values over a 0-3200 range. Both axes are sticky-filtered at the source so a parked (spring-removed) stick holds dead still without giving up 1-count precision when moved slowly
 - Transmits all control data to the robot receiver via ESP-NOW (fixed-size packed structs, no `String` members so they survive the wireless `memcpy`)
 - Receives the jukebox file list from the robot receiver in chunks and forwards it to the display board; carries a `need_filelist` flag so the receiver re-sends the list if this board boots late
 - Answers `LIST?` requests from the display board out of its cached copy, so a display reboot recovers the list without a full round trip
@@ -195,9 +195,24 @@ The neck-pivot pot and fader_left are read centre-zero: **-1600 at minimum, 0 at
 `processPotCentred()` filters these two, because an unfiltered ADC value wanders a few counts even when nothing is touched and every wander that survives the downstream threshold is a real motor step:
 
 - **Deadband** (`POT_DEADBAND`, 30 counts): anything within this of centre reads exactly 0, so a control at rest commands a hard stop rather than a small standing offset.
-- **Hysteresis** (`POT_HYSTERESIS`, 10 counts): elsewhere in travel the reported value only updates once it has moved that far from the last reported value, so noise inside the band cannot re-issue a move. Entering the deadband always snaps to 0, so coming to rest never strands a residual.
+- **Sticky band** (`POT_STICKY_BAND`, 3 counts): see below. Entering the deadband always snaps to 0, so coming to rest never strands a residual.
 
-Measured against +/-8 counts of simulated ADC noise, a control left at rest changes value 0 times at centre and once mid-travel (the initial settle) across 2000 reads, while a slow deliberate sweep from centre to full still resolves ~120 distinct steps.
+### Sticky band: stillness at rest without losing resolution
+
+`stickyBand()` is the anti-jitter filter used by the neck joystick axes and, inside `processPotCentred()`, by the neck pivot and fader_left.
+
+The obvious filter -- "only report a new value once it has moved N counts, then jump to it" -- does stop jitter, but it also quantises real movement into N-sized steps, so inching a control makes the output hop N at a time instead of counting. That is unusable on an axis you want to move slowly and precisely.
+
+Instead the reported value **trails** the live one by up to `band` and is dragged along rather than snapped:
+
+- **At rest**: noise inside +/-`band` never moves the reported value at all.
+- **Moving**: the report follows the input one count at a time, staying `band` behind, so full 1-count resolution survives.
+
+The only cost is `band` counts of lag, under a tenth of a percent of a 3200-count axis.
+
+The **neck joystick axes are filtered at the two axis reads, before the mixer**. `neck_left` and `neck_right` are a differential mix of both axes, so a couple of counts of noise on each reaches the output as a couple of counts of physical stepper motion. Filtering the mixer outputs instead would leave each axis free to jitter into the other. This matters most with the joystick springs removed, when the stick can sit parked off-centre indefinitely.
+
+Simulated against +/-8 raw counts of ADC noise with the stick parked off-centre: `neck_left` changes value **3990 times in 5000 reads unfiltered, and 0 times filtered**. A slow deliberate sweep still resolves 110 distinct values across a 111-count span, so the precision is intact.
 
 Unlike `processPot()`, this does not treat a low reading as a noise floor. That guard is free on an unsigned scale where 0 is also the bottom of travel, but here 0 is the centre, so it would make a pot turned fully to minimum snap to centre and lose the bottom of its travel.
 
