@@ -8,7 +8,7 @@ Johnny 4 is a prop robot controlled wirelessly. This board is the handheld contr
 
 ## What this firmware does
 
-- Reads analog potentiometers via four local ADS1115 ADC modules: the eyes joystick (eyes_x / eyes_y), the neck joystick (neck X / jaw Y), and the eight middle face pots (Eyebrow L/R, Basket Eyebrow L/R, Nose, Nose Basket, Bottom Eyelid L/R); the fourth module carries the neck-pivot pot and the two linear faders
+- Reads analog potentiometers via four local ADS1115 ADC modules: the eyes joystick (eyes_x / eyes_y), the neck joystick (neck X / jaw Y), and the eight middle face pots (Eyebrow L/R, Basket Eyebrow L/R, Nose, Nose Basket, Bottom Eyelid L/R); the fourth module carries the neck-pivot pot, the two linear faders, and the Nose Basket pot
 - Reads the four panel toggle switches (LASER, VENT, EYE POP, and the AUX toggle by the right joystick) on GPIOs 32/33/13/15 with internal pull-ups
 - Ingests four more pots (iris, color, brightness, volume) from [j4_display_right](https://github.com/kevinkevinlangelange/j4_display_right)'s dedicated ADS1115 over Serial2 as 25 Hz `P:` lines
 - Reads two 4x4 matrix keypads via PCF8574 I2C expanders using a custom scan routine
@@ -134,7 +134,7 @@ ADS_02 @ 0x49 (ADDR -> VDD)                 four face pots, left bank
 | A3   |  Basket Eyebrow R pot wiper   -> PCA9685 ch 9
 +------+
 
-ADS_03 @ 0x4A (ADDR -> SDA)                 four face pots, right bank
+ADS_03 @ 0x4A (ADDR -> SDA)                 three face pots, right bank
 +------+
 | VDD  |  3.3V
 | GND  |  GND
@@ -143,12 +143,12 @@ ADS_03 @ 0x4A (ADDR -> SDA)                 four face pots, right bank
 | ADDR |  SDA  = address 0x4A
 | ALRT |  not connected
 | A0   |  Nose pot wiper (up/down)     -> PCA9685 ch 10
-| A1   |  Nose Basket pot wiper        -> PCA9685 ch 11
+| A1   |  FAULTY channel, nothing connected, left unread in firmware
 | A2   |  Bottom Eyelid L pot wiper    -> PCA9685 ch 12
 | A3   |  Bottom Eyelid R pot wiper    -> PCA9685 ch 13
 +------+
 
-ADS_04 @ 0x4B (ADDR -> SCL)                 neck-pivot + linear faders
+ADS_04 @ 0x4B (ADDR -> SCL)                 neck-pivot + faders + Nose Basket
 +------+
 | VDD  |  3.3V
 | GND  |  GND
@@ -157,9 +157,9 @@ ADS_04 @ 0x4B (ADDR -> SCL)                 neck-pivot + linear faders
 | ADDR |  SCL  = address 0x4B
 | ALRT |  not connected
 | A0   |  neck-pivot pot wiper         -> nP on the stepper link (0-3200)
-| A1   |  fader_left wiper             -> Nose Basket (doubles ADS_03 A1)
+| A1   |  fader_left wiper             -> Nose Basket (doubles ADS_04 A3)
 | A2   |  fader_right wiper            -> iris (doubles j4_display_right IRIS)
-| A3   |  spare
+| A3   |  Nose Basket pot wiper        -> PCA9685 ch 11 (moved off ADS_03 A1)
 +------+
 ```
 
@@ -178,17 +178,17 @@ Local, on the four ADS1115 modules over I2C:
 | ADS_02 (0x49) | A2 | Basket Eyebrow L pot (was eye-pop, now a toggle) |
 | ADS_02 (0x49) | A3 | Basket Eyebrow R pot |
 | ADS_03 (0x4A) | A0 | Nose pot (up/down) |
-| ADS_03 (0x4A) | A1 | Nose Basket pot (up/down) |
+| ADS_03 (0x4A) | A1 | Faulty channel, unused (Nose Basket moved to ADS_04 A3) |
 | ADS_03 (0x4A) | A2 | Bottom Eyelid L pot |
 | ADS_03 (0x4A) | A3 | Bottom Eyelid R pot |
 | ADS_04 (0x4B) | A0 | Neck-pivot pot (silver knob below j4_display_left, 0-3200) |
 | ADS_04 (0x4B) | A1 | fader_left (linear fader, doubles the Nose Basket pot) |
 | ADS_04 (0x4B) | A2 | fader_right (linear fader, doubles the IRIS pot) |
-| ADS_04 (0x4B) | A3 | Spare |
+| ADS_04 (0x4B) | A3 | Nose Basket pot (up/down) |
 
 The eight face pots ride the ESP-NOW control packet to PCA9685 channels 6-13 on j4_receiver (Eyebrow L/R = ch 6/7, Basket Eyebrow L/R = ch 8/9, Nose = ch 10, Nose Basket = ch 11, Bottom Eyelid L/R = ch 12/13). The neck-pivot pot rides the packet in its own field and leaves the receiver as the `nP` slot of the stepper stream.
 
-The two linear faders each double an existing rotary pot, arbitrated last-mover-wins: whichever control of the pair moved last (beyond a small claim threshold) is the active source and its value is used, so the two never fight. fader_right pairs with the IRIS pot on j4_display_right; fader_left pairs with the Nose Basket pot. A source that is absent (module unplugged, display feed down) can neither claim nor hold active status.
+The two linear faders each double an existing rotary pot, arbitrated last-mover-wins: whichever control of the pair moved last (beyond a small claim threshold) is the active source and its value is used, so the two never fight. fader_right pairs with the IRIS pot on j4_display_right; fader_left pairs with the Nose Basket pot. A source that is absent (module unplugged, display feed down) can neither claim nor hold active status. Note that since the Nose Basket pot moved to ADS_04 A3, both halves of that pair live on ADS_04, so losing that one module drops both sources at once rather than leaving one live.
 
 Remote, streamed from j4_display_right's dedicated ADS1115 (raw counts over Serial2, scaled here with the same `processPot()`):
 

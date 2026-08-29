@@ -19,7 +19,8 @@
 //     last updated:  2026-08-21 -- CDT
 //     last updated:  2026-08-23 -- CDT
 //     last updated:  2026-08-24 -- CDT
-//     version increment:  20260824--008
+//     last updated:  2026-08-29 -- CDT
+//     version increment:  20260829--009
 //
 //
 //           author:  Kevin Lange
@@ -237,6 +238,14 @@
 //                            (was the other way round). Scaling follows
 //                            the signal, not the channel: neck/jaw stay
 //                            0-3200, eyes stay 0-255.
+//                 v0_6_26 -- ADS_03 A1 is faulty: the Nose Basket pot moves
+//                            to ADS_04 A3 (previously spare) and A1 is left
+//                            unread. Note this puts both halves of the Nose
+//                            Basket dual-source pair (rotary pot + fader_left)
+//                            on the same module, so dualPick() now takes
+//                            ads4_ok for both sides and a missing ADS_04
+//                            drops the pair together instead of leaving one
+//                            source live.
 //
 //
 //
@@ -300,16 +309,17 @@
 //      ADS_02 (0x49) A2:  Basket Eyebrow L pot  -> PCA9685 ch 8
 //      ADS_02 (0x49) A3:  Basket Eyebrow R pot  -> PCA9685 ch 9
 //      ADS_03 (0x4A) A0:  Nose pot (up/down)    -> PCA9685 ch 10
-//      ADS_03 (0x4A) A1:  Nose Basket pot       -> PCA9685 ch 11
+//      ADS_03 (0x4A) A1:  FAULTY -- unused, left unread (Nose Basket moved
+//                         off this channel to ADS_04 A3 on 2026-08-29)
 //      ADS_03 (0x4A) A2:  Bottom Eyelid L pot   -> PCA9685 ch 12
 //      ADS_03 (0x4A) A3:  Bottom Eyelid R pot   -> PCA9685 ch 13
 //      ADS_04 (0x4B) A0:  neck-pivot pot (silver knob below j4_display_left)
 //                         -> nP on the stepper link, 0-3200
 //      ADS_04 (0x4B) A1:  fader_left  (linear fader) -> Nose Basket, shared
-//                         with ADS_03 A1 (last-mover-wins)
+//                         with ADS_04 A3 (last-mover-wins)
 //      ADS_04 (0x4B) A2:  fader_right (linear fader) -> iris, shared with
 //                         j4_display_right's IRIS pot (last-mover-wins)
-//      ADS_04 (0x4B) A3:  spare
+//      ADS_04 (0x4B) A3:  Nose Basket pot       -> PCA9685 ch 11
 //
 //      TOGGLE INPUTS (INPUT_PULLUP, switch closes to GND, ON = LOW):
 //      GPIO 32:  LASER   -> PCA9685 ch 14 servo on j4_receiver
@@ -568,7 +578,7 @@ int neck_right_value = 0;
 int neck_pivot_value = 1600;  // neck-pivot pot (ADS_04 A0); centre if absent
 
 // Linear fader pots (ADS_04 A1/A2). Each doubles an existing rotary pot:
-// fader_left pairs with Nose Basket (ADS_03 A1), fader_right with the IRIS
+// fader_left pairs with Nose Basket (ADS_04 A3), fader_right with the IRIS
 // pot on j4_display_right. See dualPick() for the arbitration.
 int fader_left_value  = 0;
 int fader_right_value = 0;
@@ -579,7 +589,7 @@ int eyebrow_r_value     = 0;  // ADS_02 A1
 int basket_brow_l_value = 0;  // ADS_02 A2
 int basket_brow_r_value = 0;  // ADS_02 A3
 int nose_value          = 0;  // ADS_03 A0
-int nose_basket_value   = 0;  // ADS_03 A1
+int nose_basket_value   = 0;  // ADS_04 A3
 int eyelid_l_value      = 0;  // ADS_03 A2
 int eyelid_r_value      = 0;  // ADS_03 A3
 
@@ -813,7 +823,7 @@ AdsGuard adsg_04(ADS_04, 0x4B);
 
 // Table driving the four ADS1115 pot-value screens (screen_mode 3-6), one
 // row per module so adsPotsDisplay() doesn't need four near-duplicate
-// functions. A null value pointer (ADS_04 A3, spare) just prints "--".
+// functions. A null value pointer (ADS_03 A1, faulty) just prints "--".
 struct AdsPotScreen {
   AdsGuard   &guard;
   const char *title;
@@ -829,11 +839,11 @@ AdsPotScreen adsPotScreens[4] = {
     { "BROW L", "BROW R", "BBRW L", "BBRW R" },
     { &eyebrow_l_value, &eyebrow_r_value, &basket_brow_l_value, &basket_brow_r_value } },
   { adsg_03, "ADS_03  0x4A",
-    { "NOSE", "NOSE BK", "EYELID L", "EYELID R" },
-    { &nose_value, &nose_basket_value, &eyelid_l_value, &eyelid_r_value } },
+    { "NOSE", "A1 FAULT", "EYELID L", "EYELID R" },
+    { &nose_value, nullptr, &eyelid_l_value, &eyelid_r_value } },
   { adsg_04, "ADS_04  0x4B",
-    { "NECK PIV", "FADER L", "FADER R", "SPARE" },
-    { &neck_pivot_value, &fader_left_value, &fader_right_value, nullptr } },
+    { "NECK PIV", "FADER L", "FADER R", "NOSE BK" },
+    { &neck_pivot_value, &fader_left_value, &fader_right_value, &nose_basket_value } },
 };
 
 bool adsReady(AdsGuard &g) {
@@ -1200,23 +1210,23 @@ void loop() {
   } else {
     eyebrow_l_value = eyebrow_r_value = basket_brow_l_value = basket_brow_r_value = 0;
   }
-  bool ads3_ok = adsReady(adsg_03);
-  if (ads3_ok) {
+  if (adsReady(adsg_03)) {
     nose_value          = processPot(ADS_03.readADC(0), 255);  // Nose (up/down)
-    nose_basket_value   = processPot(ADS_03.readADC(1), 255);  // Nose Basket (up/down)
+    // A1 is faulty on this module and is left unread; Nose Basket moved to ADS_04 A3
     eyelid_l_value      = processPot(ADS_03.readADC(2), 255);  // Bottom Eyelid L
     eyelid_r_value      = processPot(ADS_03.readADC(3), 255);  // Bottom Eyelid R
   } else {
-    nose_value = nose_basket_value = eyelid_l_value = eyelid_r_value = 0;
+    nose_value = eyelid_l_value = eyelid_r_value = 0;
   }
   bool ads4_ok = adsReady(adsg_04);
   if (ads4_ok) {
     neck_pivot_value  = processPot(ADS_04.readADC(0), 3200);  // neck-pivot pot
     fader_left_value  = processPot(ADS_04.readADC(1), 255);   // fader_left  -> Nose Basket
     fader_right_value = processPot(ADS_04.readADC(2), 255);   // fader_right -> iris
+    nose_basket_value = processPot(ADS_04.readADC(3), 255);   // Nose Basket (was ADS_03 A1)
   } else {
     neck_pivot_value = 1600;   // hold centre (matches the receiver's old placeholder)
-    fader_left_value = fader_right_value = 0;
+    fader_left_value = fader_right_value = nose_basket_value = 0;
   }
   // Remote pots from j4_display_right (same raw scale -> same processPot)
   bool dispR_ok    = (millis() - lastDisplayRMs < DISPLAY_TIMEOUT_MS);
@@ -1228,7 +1238,9 @@ void loop() {
   // rotary pot vs fader_left. Last mover wins; see dualPick().
   iris_value        = dualPick(dual_iris, iris_value, dispR_ok,
                                fader_right_value, ads4_ok);
-  nose_basket_value = dualPick(dual_nose_basket, nose_basket_value, ads3_ok,
+  // Both Nose Basket sources now live on ADS_04 (rotary A3, fader A1), so a
+  // missing ADS_04 takes out the pair together rather than one at a time.
+  nose_basket_value = dualPick(dual_nose_basket, nose_basket_value, ads4_ok,
                                fader_left_value, ads4_ok);
   // --- END ADC READS ---
 
