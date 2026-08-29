@@ -223,11 +223,13 @@ Two 4x4 keypads, each on its own PCF8574 backpack on the shared I2C bus:
 - **keypad_left** (the newer keypad, left of the panel) at **0x21** -- set the backpack's A0 jumper high. If that backpack turns out to be a PCF8574**A**, the same jumper lands at 0x39; change the two `0x21`s in `main.cpp`.
 - **keypad_right** (the original keypad) at **0x20** -- all jumpers low.
 
-The left keypad drives phrase select; the right keypad drives face presets (tap = recall, 3s hold = save prompt, * confirms). Each can be absent or hot-plugged without affecting the other. Each has its own keymap string (`keymap_left` starts as a copy of `keymap_right`; if the new model's matrix ordering differs, re-derive just that string by pressing each key and rearranging).
+The left keypad drives phrase select; the right keypad drives face presets (tap = recall, 3s hold = save prompt, * confirms). Each can be absent or hot-plugged without affecting the other.
 
 Each keypad is plugged straight into its PCF8574 P0-P7 (keypad pin 1 into P0, in order). The I2CKeyPad library's fixed scan pattern does not match this wiring, so the firmware uses a custom scan via the PCF8574 library directly.
 
-Actual pin-to-wire mapping (derived on the original keypad):
+The two pads are different models and **do not put their rows and columns on the same pins**, so both the keymap string and the drive/read pin split are per-keypad (`KeypadPins`, carried in `KeypadGuard`).
+
+Right keypad (original) -- rows on P0, P1, P2, P7; scanner drives those and reads P3, P4, P5, P6:
 
 | PCF pin | Keypad wire |
 |---------|-------------|
@@ -240,7 +242,24 @@ Actual pin-to-wire mapping (derived on the original keypad):
 | P6 | Row 1 (1, 2, 3, A) |
 | P7 | Column 4 (A, B, C, D) |
 
-The scanner drives P0, P1, P2, P7 one at a time LOW and reads P3, P4, P5, P6.
+Left keypad (newer model) -- straight 4+4 split; scanner drives P0-P3 and reads P4-P7:
+
+| PCF pin | Keypad wire |
+|---------|-------------|
+| P0 | Column 1 (1, 4, 7, *) |
+| P1 | Column 2 (2, 5, 8, 0) |
+| P2 | Column 3 (3, 6, 9, #) |
+| P3 | Column 4 (A, B, C, D) |
+| P4 | Row 1 (1, 2, 3, A) |
+| P5 | Row 2 (4, 5, 6, B) |
+| P6 | Row 3 (7, 8, 9, C) |
+| P7 | Row 4 (*, 0, #, D) |
+
+### Why the split matters (bench note, 2026-08-29)
+
+A matrix key is only visible to the scanner if one of its two lines is in the drive set and the other is in the read set. Running the left pad with the right pad's split left six keys (A, B, C, *, 0, #) with both of their lines in the same set, so they produced no scan code at all and the remaining ten came out transposed. No keymap string can recover keys that never generate a code, which is why this needed the per-pad `KeypadPins` change rather than just a re-derived `keymap_left`.
+
+To re-derive a keymap for a replacement pad: press each key, note the character that appears, and rearrange that pad's string so index `drive*4 + read` holds the right character. If some keys produce nothing at all, the drive/read split is wrong, not the string.
 
 ## Face presets
 

@@ -1,27 +1,28 @@
 //******************************************************************************
 //       file name:  j4_controller.ino
-//     v0_1 created:  2023-11-08 -- 1209 CST
-//     v0_6 created:  2023-11-16 -- 2226 CST
-//   v0_6_4 created:  2026-05-20 -- 0700 CDT
-//     last updated:  2026-05-31 -- 1752 CDT
-//     last updated:  2026-06-02 -- 1045 CDT
-//     last updated:  2026-06-07 -- CDT
-//     last updated:  2026-06-10 -- CDT
-//     last updated:  2026-06-15 -- CDT
-//     last updated:  2026-06-16 -- CDT
-//     last updated:  2026-06-17 -- CDT
-//     last updated:  2026-07-02 -- CDT
-//     last updated:  2026-07-03 -- CDT
-//     last updated:  2026-07-04 -- CDT
-//     last updated:  2026-07-08 -- CDT
-//     last updated:  2026-07-12 -- CDT
-//     last updated:  2026-07-14 -- CDT
-//     last updated:  2026-08-21 -- CDT
-//     last updated:  2026-08-23 -- CDT
-//     last updated:  2026-08-24 -- CDT
-//     last updated:  2026-08-29 -- CDT
-//     last updated:  2026-08-29 -- CDT (2)
-//     version increment:  20260829--010
+//     v0_1 created:  2023-11-08 @ 1209 CST  -KL
+//     v0_6 created:  2023-11-16 @ 2226 CST  -KL
+//   v0_6_4 created:  2026-05-20 @ 0700 CDT  -KL
+//          v0_6_11:  2026-05-31 @ 1752 CDT  -KL
+//          v0_6_12:  2026-06-02 @ 1045 CDT  -KL
+//          v0_6_13:  2026-06-07  -KL
+//          v0_6_14:  2026-06-10  -KL
+//          v0_6_15:  2026-06-15  -KL
+//          v0_6_16:  2026-06-16  -KL
+//          v0_6_17:  2026-06-17  -KL
+//          v0_6_18:  2026-07-02  -KL
+//          v0_6_19:  2026-07-03  -KL
+//          v0_6_20:  2026-07-04  -KL
+//          v0_6_21:  2026-07-08  -KL
+//          v0_6_22:  2026-07-12  -KL
+//          v0_6_23:  2026-07-14  -KL
+//          v0_6_24:  2026-08-21  -KL
+//          v0_6_25:  2026-08-23  -KL
+//          v0_6_26:  2026-08-24  -KL
+//          v0_6_27:  2026-08-29  -KL
+//          v0_6_28:  2026-08-29  -KL
+//          v0_6_29:  2026-08-29  -KL
+//   ver. increment:  20260829--011 (v0_6_29)
 //
 //
 //           author:  Kevin Lange
@@ -257,6 +258,23 @@
 //                            0-3200 one, which sits inside pot noise and
 //                            would have made the neck pair flip-flop
 //                            between sources. dual_neck_pivot uses 50.
+//                 v0_6_29 -- keypad_left fixed. Six of its keys (A, B, C,
+//                            *, 0, #) were dead and the rest came out
+//                            transposed. The keymap string was only half
+//                            the problem: the scanner drove P0,P1,P2,P7
+//                            and read P3,P4,P5,P6, which is right for the
+//                            ORIGINAL pad but not the newer left one,
+//                            whose 8 lines split straight down the middle
+//                            (P0-P3 vs P4-P7). With the wrong split, any
+//                            key whose two lines both sit in the drive set
+//                            or both in the read set can never be seen at
+//                            all -- exactly the 6 dead keys -- so no
+//                            keymap edit could have recovered them. The
+//                            drive/read split now travels with the pad
+//                            (KeypadPins in KeypadGuard) and keymap_left
+//                            was re-derived for it. Right pad unchanged.
+//                            (Version labels here still run one behind the
+//                            header list after its renumber.)
 //
 //
 //
@@ -710,16 +728,25 @@ PCF8574 pcf_right(0x20);
 TFT_eSPI tft = TFT_eSPI();
 TFT_eSprite screen_bottom_sprite_203 = TFT_eSprite(&tft);
 
-// Keypad wiring: keypad pin 1 plugs into P0 straight through.
-// Actual pin→signal: P0=Row3, P1=Row2, P2=Row1, P3=Col4, P4=Col3, P5=Col2, P6=Col1, P7=Row4
-// (P3 and P7 are swapped vs the I2CKeyPad library's expectation, so we scan manually.)
-// Keymaps indexed by (drive_index*4 + read_index), drive order: P0,P1,P2,P7;
-// read order: P3,P4,P5,P6. N = NoKey, F = Fail.
-// keymap_right was derived on the bench for the original keypad. The left
-// keypad is a different model on the same backpack wiring, so it starts with
-// the same map -- if its keys come out scrambled, re-derive just that string
-// (press each key, note the character that appears, rearrange to match).
-char keymap_left[19]  = "#9630852*741DCBANF";
+// Keypad wiring: keypad pin 1 plugs into P0 straight through on both pads,
+// but the two pads are different models and do NOT put rows and columns on
+// the same pins, which is why the drive/read split is per-pad (KeypadPins).
+//   RIGHT (original): P0=Row3, P1=Row2, P2=Row1, P3=Col4, P4=Col3, P5=Col2,
+//                     P6=Col1, P7=Row4  -- rows land on P0,P1,P2,P7, so P3
+//                     and P7 are swapped vs the I2CKeyPad library's
+//                     expectation and we scan manually.
+//   LEFT  (newer):    one axis on P0-P3, the other on P4-P7, a straight 4+4
+//                     split (see KP_PINS_LEFT).
+// Keymaps indexed by (drive_index*4 + read_index) using that pad's own
+// KeypadPins order. N = NoKey, F = Fail.
+//
+// keymap_right was derived on the bench for the original keypad.
+// keymap_left was derived on the bench 2026-08-29 for the newer pad, whose
+// lines land on the PCF8574 as:
+//   P0-P3 = the {1,4,7,*} {2,5,8,0} {3,6,9,#} {A,B,C,D} groups (driven)
+//   P4-P7 = the {1,2,3,A} {4,5,6,B} {7,8,9,C} {*,0,#,D} groups (read)
+// so index = drive*4 + read walks the printed grid one column at a time.
+char keymap_left[19]  = "147*2580369#ABCDNF";
 char keymap_right[19] = "#9630852*741DCBANF";
 char last_key_char    = 'N';   // last decoded key, shown on the data screen
 int key      = -2;
@@ -728,24 +755,46 @@ String phrase_select_buffer = "";
 bool ready_message = true;
 
 
-// Drive row pins LOW one at a time, check if any col pin reads LOW.
-// Drive order: P0,P1,P2,P7 (= Row3,Row2,Row1,Row4)
-// Read  order: P3,P4,P5,P6 (= Col4,Col3,Col2,Col1)
-static const uint8_t KP_DRIVE_WRITE[4] = { 0xFE, 0xFD, 0xFB, 0x7F }; // ~(1<<P) for P=0,1,2,7
-static const uint8_t KP_READ_MASK      = 0x78;  // bits 3,4,5,6 = P3,P4,P5,P6
+// Drive one axis LOW a line at a time, check whether any line of the other
+// axis reads LOW. Which PCF8574 pins carry which axis is PER KEYPAD -- the
+// two pads are different models and split their 8 lines at different pins,
+// so the drive/read sets travel with the keypad, not baked in globally.
+//
+// A matrix key is only detectable if one of its two lines is in the drive
+// set and the other is in the read set. Get the split wrong and the keys
+// whose lines both land in the same set are invisible no matter what the
+// keymap says -- that is the failure the left pad showed on the bench
+// (its 6 dead keys), not a scrambled keymap.
+struct KeypadPins {
+  uint8_t driveWrite[4];   // ~(1 << pin), one drive line pulled LOW
+  uint8_t readBit[4];      // pin numbers of the read lines
+  uint8_t readMask;        // bit mask of the read lines (all read pins HIGH)
+};
 
-bool kpIsPressed(PCF8574 &pcf) {
-  pcf.write8(0x78);  // all row pins LOW, all col pins HIGH-Z
-  return (pcf.read8() & KP_READ_MASK) != KP_READ_MASK;
+// Right pad (original): rows on P0,P1,P2,P7 / cols on P3,P4,P5,P6.
+static const KeypadPins KP_PINS_RIGHT = {
+  { 0xFE, 0xFD, 0xFB, 0x7F },   // drive P0,P1,P2,P7
+  { 3, 4, 5, 6 },
+  0x78
+};
+// Left pad (newer model): straight 4+4 split, P0-P3 / P4-P7.
+static const KeypadPins KP_PINS_LEFT = {
+  { 0xFE, 0xFD, 0xFB, 0xF7 },   // drive P0,P1,P2,P3
+  { 4, 5, 6, 7 },
+  0xF0
+};
+
+bool kpIsPressed(PCF8574 &pcf, const KeypadPins &p) {
+  pcf.write8(p.readMask);  // all drive pins LOW, all read pins HIGH-Z
+  return (pcf.read8() & p.readMask) != p.readMask;
 }
 
-uint8_t kpGetKey(PCF8574 &pcf) {
-  static const uint8_t READ_BIT[4] = { 3, 4, 5, 6 };  // P3,P4,P5,P6
+uint8_t kpGetKey(PCF8574 &pcf, const KeypadPins &p) {
   for (uint8_t d = 0; d < 4; d++) {
-    pcf.write8(KP_DRIVE_WRITE[d]);
+    pcf.write8(p.driveWrite[d]);
     uint8_t val = pcf.read8();
     for (uint8_t r = 0; r < 4; r++) {
-      if (!(val & (1 << READ_BIT[r]))) {
+      if (!(val & (1 << p.readBit[r]))) {
         pcf.write8(0xFF);
         return d * 4 + r;
       }
@@ -890,18 +939,20 @@ bool adsReady(AdsGuard &g) {
 // Same guard for the PCF8574 keypad expanders: absent, their floating-bus
 // reads look like a key held down forever, so no scan unless the chip ACKs.
 struct KeypadGuard {
-  PCF8574      &pcf;
-  uint8_t       addr;
-  const char   *keymap;
-  bool          present;
-  unsigned long lastProbe;
-  bool          probedOnce;
-  KeypadGuard(PCF8574 &p, uint8_t a, const char *km)
-    : pcf(p), addr(a), keymap(km), present(false), lastProbe(0), probedOnce(false) {}
+  PCF8574          &pcf;
+  uint8_t           addr;
+  const char       *keymap;
+  const KeypadPins &pins;   // this pad's drive/read split (models differ)
+  bool              present;
+  unsigned long     lastProbe;
+  bool              probedOnce;
+  KeypadGuard(PCF8574 &p, uint8_t a, const char *km, const KeypadPins &kp)
+    : pcf(p), addr(a), keymap(km), pins(kp),
+      present(false), lastProbe(0), probedOnce(false) {}
 };
 
-KeypadGuard kpg_left (pcf_left,  0x21, keymap_left);
-KeypadGuard kpg_right(pcf_right, 0x20, keymap_right);
+KeypadGuard kpg_left (pcf_left,  0x21, keymap_left,  KP_PINS_LEFT);
+KeypadGuard kpg_right(pcf_right, 0x20, keymap_right, KP_PINS_RIGHT);
 
 bool keypadReady(KeypadGuard &g) {
   if (!g.present) {   // absent (or never seen): probe only once a second
@@ -1403,8 +1454,8 @@ void loop() {
     // LEFT keypad -- phrase select (jukebox). The right keypad became the
     // face keypad in v0_6_22 and is scanned separately below.
     KeypadGuard &pad = kpg_left;
-    if (keypadReady(pad) && kpIsPressed(pad.pcf)) {
-      uint8_t rawKey = kpGetKey(pad.pcf);
+    if (keypadReady(pad) && kpIsPressed(pad.pcf, pad.pins)) {
+      uint8_t rawKey = kpGetKey(pad.pcf, pad.pins);
 
       if (rawKey <= 15) {  // 16 = NoKey - only promote to global on valid read
       key = (int)rawKey;
@@ -1467,10 +1518,10 @@ void loop() {
     // (any key but '*') = save prompt on j4_display_right; while the prompt
     // is up, '*' confirms and any other key cancels. Pure state tracking at
     // the same 150ms scan cadence -- nothing here blocks.
-    bool rk_pressed = keypadReady(kpg_right) && kpIsPressed(kpg_right.pcf);
+    bool rk_pressed = keypadReady(kpg_right) && kpIsPressed(kpg_right.pcf, kpg_right.pins);
     uint8_t rk_raw  = 16;
     if (rk_pressed) {
-      rk_raw = kpGetKey(kpg_right.pcf);
+      rk_raw = kpGetKey(kpg_right.pcf, kpg_right.pins);
       if (rk_raw > 15) rk_pressed = false;   // ghost read -- treat as none
     }
     if (rk_pressed) {
