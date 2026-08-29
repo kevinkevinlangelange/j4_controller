@@ -22,7 +22,8 @@
 //          v0_6_27:  2026-08-29  -KL
 //          v0_6_28:  2026-08-29  -KL
 //          v0_6_29:  2026-08-29  -KL
-//   ver. increment:  20260829--011 (v0_6_29)
+//          v0_6_30:  2026-08-29  -KL
+//   ver. increment:  20260829--012 (v0_6_30)
 //
 //
 //           author:  Kevin Lange
@@ -60,7 +61,7 @@
 //                            if no status packet arrives, or the reported fault
 //                            (e.g. "NL OT", "EYES OFFLINE"). Green when healthy,
 //                            red otherwise.
-//                 v0_6_10 -- Added a screen-cycle button (TTGO built-in GPIO 35,
+//                 v0_6_11 -- Added a screen-cycle button (TTGO built-in GPIO 35,
 //                            like j4_receiver): data -> MAC address -> connection
 //                            status. The connection screen shows ESP-NOW LINK,
 //                            j4_stepper_neck, j4_stepper_eyes, j4_talk, and
@@ -68,13 +69,13 @@
 //                            carries neck_ok/eyes_ok/talk_ok from the receiver, the
 //                            control packet carries display_ok, and j4_display +
 //                            j4_talk send a "PING" heartbeat so they can be seen.
-//                 v0_6_11 -- The stepper boards were consolidated: j4_stepper
+//                 v0_6_12 -- The stepper boards were consolidated: j4_stepper
 //                            (renamed from j4_stepper_neck) now drives all five
 //                            steppers and j4_stepper_eyes is retired. The status
 //                            packet's neck_ok/eyes_ok became a single stepper_ok
 //                            (matching j4_receiver v0_7r_12), and the connection
 //                            screen lists j4_stepper instead of the two boards.
-//                 v0_6_12 -- Second XIAO display board: j4_display_right (the old
+//                 v0_6_13 -- Second XIAO display board: j4_display_right (the old
 //                            j4_display is renamed j4_display_left). It carries
 //                            its own ADS1115 reading the four top-right pots and
 //                            streams raw counts here over Serial2 (TX 25 / RX 26)
@@ -85,13 +86,13 @@
 //                            for the WS2812B strip on j4_receiver. display_ok
 //                            split into display_l_ok / display_r_ok; the conn
 //                            screen shows both displays.
-//                 v0_6_13 -- The stepper boards split back into j4_stepper_neck +
+//                 v0_6_14 -- The stepper boards split back into j4_stepper_neck +
 //                            j4_stepper_eyes (per-endpoint limit switches needed
 //                            the extra pins). Restored the eyes_ok field in the
 //                            ESP-NOW status packet (matching j4_receiver
 //                            v0_7r_14) and the j4_stepper_eyes row on the
 //                            connection screen.
-//                 v0_6_14 -- RF hardening for crowded venues (Open Sauce prep),
+//                 v0_6_15 -- RF hardening for crowded venues (Open Sauce prep),
 //                            matching j4_receiver v0_7r_15: ESP-NOW now runs on
 //                            the ESP32 long-range (LR) PHY (~4dB more sensitive;
 //                            ordinary WiFi gear cannot decode it -- both ends
@@ -100,7 +101,7 @@
 //                            sender MAC is not our receiver. ESP-NOW channel
 //                            pinned to 6 (ESPNOW_CHANNEL) to dodge other ESP-NOW
 //                            projects on the default channel 1.
-//                 v0_6_15 -- All control surfaces accounted for. Added ADS_03
+//                 v0_6_16 -- All control surfaces accounted for. Added ADS_03
 //                            (0x4A) + ADS_04 (0x4B): the eight middle face pots
 //                            (eyebrow L/R, basket eyebrow L/R, nose, nose basket,
 //                            bottom eyelid L/R) now read on ADS_01 + ADS_03 and
@@ -117,7 +118,7 @@
 //                            AUX is read + transmitted but unassigned. The
 //                            control packet gains eight pot fields + a toggle
 //                            bitmask (matching j4_receiver v0_7r_16).
-//                 v0_6_16 -- Fixed a total lockup when any ADS1115 is absent:
+//                 v0_6_17 -- Fixed a total lockup when any ADS1115 is absent:
 //                            the ADS1X15 library's readADC() has no timeout,
 //                            so with no chip on the bus isBusy() never clears
 //                            and the first read in loop() spun forever (frozen
@@ -128,7 +129,7 @@
 //                            read 0 (joystick axes centre at 1600) and are
 //                            re-probed each pass, so the board runs fine bare
 //                            on USB power and ADCs can even be hot-plugged.
-//                 v0_6_17 -- Fixed the second lockup (~2s after boot, bare
+//                 v0_6_18 -- Fixed the second lockup (~2s after boot, bare
 //                            board): esp_now_send() ran every loop pass, only
 //                            ever throttled by the old blocking ADC reads.
 //                            With no ADCs the loop spun at multi-kHz, sends
@@ -142,7 +143,7 @@
 //                            file-list forward to the display moved from
 //                            OnDataRecv into loop() so Serial1 is written
 //                            from one context only.
-//                 v0_6_18 -- Fixed the ~2s-per-cycle stall on a bare board:
+//                 v0_6_19 -- Fixed the ~2s-per-cycle stall on a bare board:
 //                            with no I2C modules attached the bus has no
 //                            pull-ups (they live on the breakouts), so a
 //                            probe doesn't fast-NACK -- it eats the driver
@@ -155,11 +156,11 @@
 //                            second (I2C_REPROBE_MS), and the keypad scan
 //                            is gated on the PCF8574 ACKing (a floating bus
 //                            read looks like a key held down forever).
-//                 v0_6_19 -- Disconnect-audit residual: only "PING" / "LIST?"
+//                 v0_6_20 -- Disconnect-audit residual: only "PING" / "LIST?"
 //                            count as the j4_display_left heartbeat. Any line
 //                            used to count, so garbage from the floating RX
 //                            pin (display unplugged) faked CONNECTED.
-//                 v0_6_20 -- Second 4x4 keypad. keypad_left is the NEW keypad
+//                 v0_6_21 -- Second 4x4 keypad. keypad_left is the NEW keypad
 //                            (own PCF8574 backpack at 0x21 -- A0 jumper high;
 //                            a PCF8574A backpack would land at 0x39 instead);
 //                            keypad_right is the original at 0x20. Both drive
@@ -170,7 +171,7 @@
 //                            matrix comes out scrambled). Each pad has its
 //                            own presence guard, so either can be absent or
 //                            hot-plugged.
-//                 v0_6_21 -- ADS_04 (0x4B) goes live: A0 is the neck-pivot
+//                 v0_6_22 -- ADS_04 (0x4B) goes live: A0 is the neck-pivot
 //                            pot (silver knob below j4_display_left, 0-3200
 //                            like neck L/R, rides the control packet in the
 //                            new neck_pivot field -> receiver -> nP on the
@@ -183,7 +184,7 @@
 //                            never fight. A source that is absent (module
 //                            unplugged, display feed down) can neither claim
 //                            nor hold active status.
-//                 v0_6_22 -- FACE PRESETS. The right keypad stops doubling the
+//                 v0_6_23 -- FACE PRESETS. The right keypad stops doubling the
 //                            phrase-select pad and becomes the face keypad:
 //                            hold any key (except *) for 3s and j4_display_right
 //                            asks "SAVE FACE ON <key>? PRESS * TO CONFIRM"
@@ -213,7 +214,7 @@
 //                            The controller now also talks TO j4_display_right
 //                            (Serial2 TX GPIO 25, previously reserved):
 //                            "M:<line1>|<line2>" shows a message, "X:" clears.
-//                 v0_6_23 -- Screen-cycle button gains four more pages (still
+//                 v0_6_24 -- Screen-cycle button gains four more pages (still
 //                            wraps: data -> MAC -> status -> ADS_01..ADS_04),
 //                            showing each ADS1115 module's live raw pot
 //                            counts and CONNECTED/DISCONNECTED for bench
@@ -227,7 +228,7 @@
 //                            entirely (board is 12+12 pins, diagram only
 //                            showed 11+11); verified against LilyGO's own
 //                            pinout image, not just the schematic.
-//                 v0_6_24 -- ADS_01 and ADS_02 swap payloads to match a
+//                 v0_6_25 -- ADS_01 and ADS_02 swap payloads to match a
 //                            rewire: both joysticks (eyes X/Y, neck X/Y)
 //                            now land on ADS_01 (0x48) and the four
 //                            left-bank face pots (Eyebrow L/R, Basket
@@ -235,12 +236,12 @@
 //                            unchanged -- ADS_01 is still 0x48 and ADS_02
 //                            still 0x49, so no ADDR strap moves; only
 //                            which pot wires land on which module's A0-A3.
-//                 v0_6_25 -- ADS_01 channel order: neck joystick X/Y move
+//                 v0_6_26 -- ADS_01 channel order: neck joystick X/Y move
 //                            to A0/A1 and eyes joystick X/Y to A2/A3
 //                            (was the other way round). Scaling follows
 //                            the signal, not the channel: neck/jaw stay
 //                            0-3200, eyes stay 0-255.
-//                 v0_6_26 -- ADS_03 A1 is faulty: the Nose Basket pot moves
+//                 v0_6_27 -- ADS_03 A1 is faulty: the Nose Basket pot moves
 //                            to ADS_04 A3 (previously spare) and A1 is left
 //                            unread. Note this puts both halves of the Nose
 //                            Basket dual-source pair (rotary pot + fader_left)
@@ -248,7 +249,7 @@
 //                            ads4_ok for both sides and a missing ADS_04
 //                            drops the pair together instead of leaving one
 //                            source live.
-//                 v0_6_27 -- fader_left now doubles the NECK-PIVOT pot
+//                 v0_6_28 -- fader_left now doubles the NECK-PIVOT pot
 //                            (ADS_04 A0) instead of Nose Basket, so it is
 //                            read on the 0-3200 neck scale rather than
 //                            0-255. Nose Basket (ADS_04 A3) goes back to
@@ -273,8 +274,19 @@
 //                            drive/read split now travels with the pad
 //                            (KeypadPins in KeypadGuard) and keymap_left
 //                            was re-derived for it. Right pad unchanged.
-//                            (Version labels here still run one behind the
-//                            header list after its renumber.)
+//                 v0_6_30 -- Default (data) screen relabelled and rebuilt:
+//                            Keypad_L / Playing / VOL / Keypad_R / Eye-X /
+//                            Eye-Y / Neck-L / Neck-R / Neck-PIV, with IRIS
+//                            and EYE-P dropped from the readout (both are
+//                            still read and transmitted, just not shown).
+//                            Neck-PIV surfaces the neck-pivot value, which
+//                            had no on-screen readout before. The two pads
+//                            also get their own last-key variables: both
+//                            used to write last_key_char, so the single
+//                            "Keypress" line showed whichever pad was
+//                            touched last rather than a specific one.
+//                            Update-log labels above were shifted +1 to
+//                            match the renumbered header list.
 //
 //
 //
@@ -748,7 +760,11 @@ TFT_eSprite screen_bottom_sprite_203 = TFT_eSprite(&tft);
 // so index = drive*4 + read walks the printed grid one column at a time.
 char keymap_left[19]  = "147*2580369#ABCDNF";
 char keymap_right[19] = "#9630852*741DCBANF";
-char last_key_char    = 'N';   // last decoded key, shown on the data screen
+// Last decoded key from each pad, shown on the data screen as Keypad_L /
+// Keypad_R. Kept separate: before v0_6_30 both pads wrote last_key_char, so
+// the single "Keypress" line showed whichever pad was touched most recently.
+char last_key_char       = 'N';   // left pad  (phrase select)
+char last_key_char_right = 'N';   // right pad (face presets)
 int key      = -2;
 int old_key  = -1;
 String phrase_select_buffer = "";
@@ -1452,7 +1468,7 @@ void loop() {
     keypad_previousMillis = currentMillis;
 
     // LEFT keypad -- phrase select (jukebox). The right keypad became the
-    // face keypad in v0_6_22 and is scanned separately below.
+    // face keypad in v0_6_23 and is scanned separately below.
     KeypadGuard &pad = kpg_left;
     if (keypadReady(pad) && kpIsPressed(pad.pcf, pad.pins)) {
       uint8_t rawKey = kpGetKey(pad.pcf, pad.pins);
@@ -1531,7 +1547,7 @@ void loop() {
         rk_down_since = currentMillis;
         rk_hold_fired = false;
         rk_consumed   = false;
-        last_key_char = kc;
+        last_key_char_right = kc;
         if (face_prompt_key) {               // this press answers the prompt
           rk_consumed = true;
           if (kc == '*') faceSaveConfirmed();
@@ -1698,14 +1714,14 @@ void sendFileListToXIAO() {
 void labelsDisplaySprite() {
   screen_bottom_sprite_203.fillRect(0, 20, 70, 160, TFT_BLACK);
   screen_bottom_sprite_203.setTextColor(TFT_GREEN);
-  screen_bottom_sprite_203.drawString("Playing: ", 0,  20, 2);
-  screen_bottom_sprite_203.drawString("VOL: ",     0,  40, 2);
-  screen_bottom_sprite_203.drawString("IRIS: ",    0,  60, 2);
-  screen_bottom_sprite_203.drawString("EYE-P: ",   0,  80, 2);
-  screen_bottom_sprite_203.drawString("EYE-X: ",   0, 100, 2);
-  screen_bottom_sprite_203.drawString("EYE-Y: ",   0, 120, 2);
-  screen_bottom_sprite_203.drawString("NK-L: ",    0, 140, 2);
-  screen_bottom_sprite_203.drawString("NK-R: ",    0, 160, 2);
+  screen_bottom_sprite_203.drawString("Playing: ",  0,  20, 2);
+  screen_bottom_sprite_203.drawString("VOL: ",      0,  40, 2);
+  screen_bottom_sprite_203.drawString("Keypad_R: ", 0,  60, 2);
+  screen_bottom_sprite_203.drawString("Eye-X: ",    0,  80, 2);
+  screen_bottom_sprite_203.drawString("Eye-Y: ",    0, 100, 2);
+  screen_bottom_sprite_203.drawString("Neck-L: ",   0, 120, 2);
+  screen_bottom_sprite_203.drawString("Neck-R: ",   0, 140, 2);
+  screen_bottom_sprite_203.drawString("Neck-PIV: ", 0, 160, 2);
 }
 
 
@@ -1724,17 +1740,17 @@ void dataDisplaySprite() {
   screen_bottom_sprite_203.fillRect(70, 40, 65, 140, TFT_BLACK);
 
   if (!ready_message) {
-    screen_bottom_sprite_203.drawString("Keypress: ",        0,  0, 2);
+    screen_bottom_sprite_203.drawString("Keypad_L: ",        0,  0, 2);
     screen_bottom_sprite_203.drawString(String(last_key_char), 70, 0, 2);
   }
 
-  screen_bottom_sprite_203.drawString(String(volume_value),    70,  40, 2);
-  screen_bottom_sprite_203.drawString(String(iris_value),      70,  60, 2);
-  screen_bottom_sprite_203.drawString(String(eye_pop_value),   70,  80, 2);
-  screen_bottom_sprite_203.drawString(String(eyes_x_value),    70, 100, 2);
-  screen_bottom_sprite_203.drawString(String(eyes_y_value),    70, 120, 2);
-  screen_bottom_sprite_203.drawString(String(neck_left_value),  70, 140, 2);
-  screen_bottom_sprite_203.drawString(String(neck_right_value), 70, 160, 2);
+  screen_bottom_sprite_203.drawString(String(volume_value),          70,  40, 2);
+  screen_bottom_sprite_203.drawString(String(last_key_char_right),   70,  60, 2);
+  screen_bottom_sprite_203.drawString(String(eyes_x_value),          70,  80, 2);
+  screen_bottom_sprite_203.drawString(String(eyes_y_value),          70, 100, 2);
+  screen_bottom_sprite_203.drawString(String(neck_left_value),       70, 120, 2);
+  screen_bottom_sprite_203.drawString(String(neck_right_value),      70, 140, 2);
+  screen_bottom_sprite_203.drawString(String(neck_pivot_value),      70, 160, 2);
 
   // System status line (green when healthy, red on any fault / link loss)
   String st = buildStatusLine();
