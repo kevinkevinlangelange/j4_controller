@@ -20,7 +20,7 @@ Johnny 4 is a prop robot controlled wirelessly. This board is the handheld contr
 - Receives the jukebox file list from the robot receiver in chunks and forwards it to the display board; carries a `need_filelist` flag so the receiver re-sends the list if this board boots late
 - Answers `LIST?` requests from the display board out of its cached copy, so a display reboot recovers the list without a full round trip
 - Displays live pot values, keypress state, and battery voltage on the built-in TFT. The default (data) screen reads: Keypad_L, Playing, VOL, Keypad_R, Eye-X, Eye-Y, Neck-L, Neck-R, Neck-PIV, then the STATUS line. Each keypad has its own last-key line
-- The TTGO's built-in button (GPIO 35) cycles the TFT through seven screens: live data, WiFi MAC address, a connection-status screen showing ESP-NOW LINK, j4_stepper_neck, j4_stepper_eyes, j4_talk, j4_display_left, and j4_display_right as CONNECTED (green) / DISCONNECTED (red), then four more showing each ADS1115 module's live **raw** counts (ADS_01 through ADS_04) for bench testing and for calibrating fader windows and joystick centres without a laptop on the I2C bus
+- The TTGO's built-in button (GPIO 35) cycles the TFT through seven screens: live data, WiFi MAC address, a connection-status screen showing ESP-NOW LINK, j4_stepper_neck, j4_stepper_eyes, j4_talk, j4_display_left, and j4_display_right as CONNECTED (green) / DISCONNECTED (red), then four more, one per ADS1115 module (ADS_01 through ADS_04). Each shows eight values: every channel's live **raw** count, and under it what that channel drives plus the processed value that leaves this board. Raw is what you need to calibrate a fader window or a joystick centre, so this replaces putting a laptop on the I2C bus
 - Sends a 49-byte binary status packet to the j4_display_left board at 25 fps over UART
 - Shows a STATUS line on the built-in TFT: "ONLINE" when the ESP-NOW link is up and the steppers are healthy, "OFFLINE" if no status packet arrives, or the reported stepper fault (e.g. "NL OT", "EYES OFFLINE"); green when healthy, red on any fault
 
@@ -201,11 +201,15 @@ fader_left is mounted inverted relative to fader_right, so its physical bottom i
 
 The window is defined by **measured raw endpoints** (`FADER_L_RAW_BOTTOM` / `_TOP`, `FADER_R_RAW_BOTTOM` / `_TOP`), not by percentages of the ADC range. A fader's electrical span reaches neither the ADC rails nor the ends of its own mechanical travel, so the physical-to-raw relationship has to be measured. Assuming it was linear across the full ADC range is what left a stretch of dead motion at the bottom of fader_left's throw.
 
-**Calibrating a fader window.** Cycle the TFT to the ADS_04 screen, which shows raw counts. Park the fader at its physical bottom and read the FADER_L / FADER_R value: that is `_RAW_BOTTOM`. Move it to the 40% mark and read it again: that is `_RAW_TOP`. Put both in `main.cpp` and reflash. The two intermediate points (20% = centre) fall out of the linear map.
+**Calibrated 2026-08-30:** fader_left reads 17560 raw at its physical bottom, fader_right reads 0 at its. 17560 counts is 3.29V, so the faders span the full 3.3V rail end to end and the 40% endpoints are that span scaled (left 10536, right 7024).
+
+**Recalibrating a fader window.** Cycle the TFT to the ADS_04 screen, which shows raw counts. Park the fader at its physical bottom and read the FADER L / FADER R value: that is `_RAW_BOTTOM`. Move it to the 40% mark and read it again: that is `_RAW_TOP`. Put both in `main.cpp` and reflash. The 20% (centre) point falls out of the linear map. Getting `_RAW_BOTTOM` wrong is what produces dead motion at the bottom of the throw: the output sits pinned at its endpoint until the raw count crosses it.
 
 ### Eye joystick
 
-Both axes read centre-zero, **-128 at one extreme, 0 at spring-centre, +128 at the other**, with a small deadzone (`EYE_DEADZONE`) so neutral is exactly 0/0.
+Both axes read centre-zero, **-128 at one extreme, 0 at spring-centre, +128 at the other**, with a deadzone (`EYE_DEADZONE`) so neutral is exactly 0/0.
+
+The deadzone alone is not enough to hold neutral at zero. `stickyBand()` trails its input by up to `band`, so it will settle one count off centre and stay there. `eyeAxis()` therefore forces a hard 0 whenever the mapped value lands in the deadzone rather than letting the band drag toward it -- the same thing `processPotCentred()` does for the centre-zero pots. Without that snap the stick rests at -1 / +1 instead of 0 / 0.
 
 The stick's electrical centre is not the midpoint of its travel, and the two halves of each axis are not the same width, so **each half is mapped on its own scale** from the measured calibration points (`EYE_X_AT_MINUS` / `_AT_ZERO` / `_AT_PLUS` and the Y equivalents). A single straight map across the whole axis would leave neutral off-zero and make one direction hit its endpoint before the other.
 

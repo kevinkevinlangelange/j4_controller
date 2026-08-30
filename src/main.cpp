@@ -26,7 +26,8 @@
 //          v0_6_31:  2026-08-29  -KL
 //          v0_6_32:  2026-08-29  -KL
 //          v0_6_33:  2026-08-30  -KL
-//   ver. increment:  20260830--015 (v0_6_33)
+//          v0_6_34:  2026-08-30  -KL
+//   ver. increment:  20260830--016 (v0_6_34)
 //
 //
 //           author:  Kevin Lange
@@ -381,6 +382,30 @@
 //                            The display packet's eyes slots are uint8_t, so
 //                            they get the same re-centring; casting the signed
 //                            value straight in would have wrapped it.
+//                 v0_6_34 -- Bench corrections to v0_6_33.
+//                            Eyes read exactly 0/0 at rest again. The deadzone
+//                            was not the problem: it did map neutral to 0, but
+//                            stickyBand() trails its input by up to `band` and
+//                            so parked one count off and stayed there, giving
+//                            the -1 / +1 at rest. New eyeAxis() forces a hard 0
+//                            inside the deadzone instead of dragging toward it,
+//                            the same way processPotCentred() already did for
+//                            the centre-zero pots. Deadzone also widened 6->10
+//                            as asked. Verified 0 non-zero reads in 2000 from
+//                            any prior state.
+//                            fader_left calibrated: measured 17560 raw at its
+//                            physical bottom, so FADER_L_RAW_BOTTOM was 160
+//                            counts too low and pinned the output at -2048
+//                            across that span (the pivot not responding until
+//                            ~17403). 17560 counts is 3.29V, so the faders do
+//                            span the full rail and the 40% endpoints are that
+//                            span scaled. fader_right measured 0 at its bottom,
+//                            as assumed.
+//                            ADS screens now show eight values per module
+//                            instead of four: each channel's raw count, and
+//                            under it what that channel drives plus the
+//                            processed value that leaves this board. ADS_01 A1
+//                            relabelled JAW Y -> NECK Y.
 //
 //
 //
@@ -1041,11 +1066,19 @@ int mapWindow(int raw, int rawLo, int rawHi, int outLo, int outHi) {
 // _RAW_BOTTOM, and at the 40% mark for _RAW_TOP.
 //
 // fader_left is mounted inverted, hence BOTTOM > TOP.
-#define FADER_L_RAW_BOTTOM  17400   // physical 0%  -> -2048
-#define FADER_L_RAW_TOP     10440   // physical 40% -> +2048
+//
+// Measured 2026-08-30: fader_left reads 17560 at its physical bottom and
+// fader_right reads 0 at its. 17560 counts is 3.29V, i.e. the faders do span
+// the full 3.3V rail end to end, so the 40% points are that span scaled:
+// left  17560 -> 17560*0.6 = 10536, right 0 -> 17560*0.4 = 7024.
+// (Only the two BOTTOM figures were measured directly. If the 40% marks feel
+//  off on the bench, read the raw at the 40% mark and set _TOP from it.)
+#define FADER_FULL_SCALE    17560   // raw at 100% of fader travel
+#define FADER_L_RAW_BOTTOM  17560   // physical 0%  -> -2048
+#define FADER_L_RAW_TOP     10536   // physical 40% -> +2048
 #define FADER_L_OUT          2048
-#define FADER_R_RAW_BOTTOM    200   // physical 0%  ->     0
-#define FADER_R_RAW_TOP      6960   // physical 40% ->   255
+#define FADER_R_RAW_BOTTOM      0   // physical 0%  ->     0
+#define FADER_R_RAW_TOP      7024   // physical 40% ->   255
 #define FADER_R_OUT           255
 
 // Eye joystick calibration, in processPot 0-255 units, measured on the bench
@@ -1060,7 +1093,7 @@ int mapWindow(int raw, int rawLo, int rawHi, int outLo, int outHi) {
 #define EYE_Y_AT_ZERO   117   // spring-centred
 #define EYE_Y_AT_PLUS   235   // top extreme -> +128
 #define EYE_OUT         128   // full-scale magnitude either side of zero
-#define EYE_DEADZONE      6   // output counts either side of 0 that read as 0
+#define EYE_DEADZONE     10   // output counts either side of 0 that read as 0
 #define EYE_STICKY_BAND   1   // see stickyBand(); 1 count of a 256 span
 
 // Map one joystick axis to -EYE_OUT..0..+EYE_OUT, each half on its own scale
@@ -1074,6 +1107,18 @@ int mapAxisCentred(int v, int atMinus, int atZero, int atPlus, int out) {
                             : mapWindow(v, atZero, atMinus, 0, -out));
   if (abs(r) <= EYE_DEADZONE) r = 0;   // neutral must be dead silent
   return r;
+}
+
+// One eye axis, end to end. The deadzone SNAP is the important part: the
+// sticky band trails its input by up to `band`, so on its own it will park
+// one count off zero and sit there (that is what left the stick reading -1
+// and +1 at rest). Inside the deadzone the state is forced to a hard 0
+// instead of being dragged toward it; outside, the band does its usual job.
+int eyeAxis(int raw, int atMinus, int atZero, int atPlus, int &state) {
+  int v = mapAxisCentred(processPot(raw, 255), atMinus, atZero, atPlus, EYE_OUT);
+  if (v == 0) state = 0;
+  else        stickyBand(v, EYE_STICKY_BAND, state);
+  return state;
 }
 
 int processPotCentred(int raw, int half, bool invert, int &state) {
@@ -1185,18 +1230,39 @@ AdsGuard adsg_04(ADS_04, 0x4B);
 // These show RAW ADS1115 counts, not the processed values -- raw is what you
 // need to calibrate a fader window or a joystick centre, and this is the only
 // place it is visible. Channels that are not read print "--".
+// Each channel gets two lines: the raw count, and under it what that channel
+// drives plus the processed value that actually leaves this board. A null
+// value pointer (a disabled or faulty channel) prints "--".
+//
+// The two neck channels are the one place the pairing is not one-to-one: X
+// and Y are mixed into neck-L and neck-R together, so rather than invent a
+// per-axis destination the screen shows one mixed output under each.
 struct AdsPotScreen {
   AdsGuard   &guard;
   const char *title;
   uint8_t     module;        // index into ads_raw[][]
-  const char *labels[4];
+  const char *labels[4];     // channel name, beside the raw count
+  const char *dests[4];      // what it drives, beside the processed value
+  int        *values[4];     // processed value (nullptr = channel not in use)
 };
 
 AdsPotScreen adsPotScreens[4] = {
-  { adsg_01, "ADS_01  0x48", 0, { "NECK X", "JAW Y", "EYES X", "EYES Y" } },
-  { adsg_02, "ADS_02  0x49", 1, { "BROW L", "BROW R", "BBRW L", "BBRW R" } },
-  { adsg_03, "ADS_03  0x4A", 2, { "NOSE", "A1 FAULT", "EYELID L", "EYELID R" } },
-  { adsg_04, "ADS_04  0x4B", 3, { "PIV OFF", "FADER L", "FADER R", "NOSE BK" } },
+  { adsg_01, "ADS_01  0x48", 0,
+    { "NECK X", "NECK Y", "EYES X", "EYES Y" },
+    { "NECK-L", "NECK-R", "EYE-X",  "EYE-Y"  },
+    { &neck_left_value, &neck_right_value, &eyes_x_value, &eyes_y_value } },
+  { adsg_02, "ADS_02  0x49", 1,
+    { "BROW L", "BROW R", "BBRW L", "BBRW R" },
+    { "PCA 6",  "PCA 7",  "PCA 8",  "PCA 9"  },
+    { &eyebrow_l_value, &eyebrow_r_value, &basket_brow_l_value, &basket_brow_r_value } },
+  { adsg_03, "ADS_03  0x4A", 2,
+    { "NOSE",   "A1 FAULT", "EYELID L", "EYELID R" },
+    { "PCA 10", "OFF",      "PCA 12",   "PCA 13"   },
+    { &nose_value, nullptr, &eyelid_l_value, &eyelid_r_value } },
+  { adsg_04, "ADS_04  0x4B", 3,
+    { "PIV OFF", "FADER L",  "FADER R", "NOSE BK" },
+    { "OFF",     "NECK PIV", "IRIS",    "PCA 11"  },
+    { nullptr, &neck_pivot_value, &iris_value, &nose_basket_value } },
 };
 
 bool adsReady(AdsGuard &g) {
@@ -1560,13 +1626,9 @@ void loop() {
     // instead would leave each axis free to jitter into the other.
     neck_value   = stickyBand(processPot(ads_raw[0][0], 3200), POT_STICKY_BAND, neck_sticky);
     jaw_value    = stickyBand(processPot(ads_raw[0][1], 3200), POT_STICKY_BAND, jaw_sticky);
-    // Eyes are centre-zero (-128..0..128) with their own deadzone at neutral.
-    eyes_x_value = stickyBand(mapAxisCentred(processPot(ads_raw[0][2], 255),
-                                             EYE_X_AT_MINUS, EYE_X_AT_ZERO, EYE_X_AT_PLUS, EYE_OUT),
-                              EYE_STICKY_BAND, eyex_sticky);
-    eyes_y_value = stickyBand(mapAxisCentred(processPot(ads_raw[0][3], 255),
-                                             EYE_Y_AT_MINUS, EYE_Y_AT_ZERO, EYE_Y_AT_PLUS, EYE_OUT),
-                              EYE_STICKY_BAND, eyey_sticky);
+    // Eyes are centre-zero (-128..0..128) with a hard zero at neutral.
+    eyes_x_value = eyeAxis(ads_raw[0][2], EYE_X_AT_MINUS, EYE_X_AT_ZERO, EYE_X_AT_PLUS, eyex_sticky);
+    eyes_y_value = eyeAxis(ads_raw[0][3], EYE_Y_AT_MINUS, EYE_Y_AT_ZERO, EYE_Y_AT_PLUS, eyey_sticky);
   } else {
     eyes_x_value = eyes_y_value = 0;      // centre-zero: 0 = eyes centred
     eyex_sticky  = eyey_sticky  = 0;
@@ -2166,17 +2228,27 @@ void adsPotsDisplay(int idx) {
   bool ok = adsReady(s.guard);
 
   tft.setTextColor(TFT_WHITE, TFT_BLACK);
-  tft.drawString(s.title, 6, 10, 2);
+  tft.drawString(s.title, 6, 4, 2);
   tft.setTextColor(ok ? TFT_GREEN : TFT_RED, TFT_BLACK);
-  tft.drawString(ok ? "CONNECTED   " : "DISCONNECTED", 6, 30, 2);
+  tft.drawString(ok ? "CONNECTED   " : "DISCONNECTED", 6, 22, 2);
 
   for (int i = 0; i < 4; i++) {
-    int y = 60 + i * 40;
+    int y = 46 + i * 40;
+
+    // Line 1: channel name and its raw ADS1115 count.
     tft.setTextColor(TFT_WHITE, TFT_BLACK);
     tft.drawString(s.labels[i], 0, y, 2);
+    tft.fillRect(70, y, 65, 17, TFT_BLACK);
     tft.setTextColor(TFT_GREEN, TFT_BLACK);
-    tft.fillRect(70, y, 65, 20, TFT_BLACK);
     int raw = ads_raw[s.module][i];
     tft.drawString(raw < 0 ? "--" : String(raw), 70, y, 2);
+
+    // Line 2: what that channel drives, and the value that leaves this board.
+    int y2 = y + 18;
+    tft.setTextColor(TFT_LIGHTGREY, TFT_BLACK);
+    tft.drawString(s.dests[i], 8, y2, 2);
+    tft.fillRect(70, y2, 65, 17, TFT_BLACK);
+    tft.setTextColor(TFT_CYAN, TFT_BLACK);
+    tft.drawString(s.values[i] ? String(*s.values[i]) : "--", 70, y2, 2);
   }
 }
