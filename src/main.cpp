@@ -27,7 +27,8 @@
 //          v0_6_32:  2026-08-29  -KL
 //          v0_6_33:  2026-08-30  -KL
 //          v0_6_34:  2026-08-30  -KL
-//   ver. increment:  20260830--016 (v0_6_34)
+//          v0_6_35:  2026-08-30  -KL
+//   ver. increment:  20260830--017 (v0_6_35)
 //
 //
 //           author:  Kevin Lange
@@ -406,6 +407,24 @@
 //                            under it what that channel drives plus the
 //                            processed value that leaves this board. ADS_01 A1
 //                            relabelled JAW Y -> NECK Y.
+//                 v0_6_35 -- Neck-L and Neck-R become centre-zero too
+//                            (-1600..0..1600, matching the neck pivot), and
+//                            the pivot's own range narrows from +/-2048 to
+//                            +/-1600. Both joystick axes are offset to
+//                            centre-zero BEFORE the differential mix rather
+//                            than after: mixing in the old 0-3200 domain and
+//                            subtracting afterwards would clamp against the
+//                            wrong ends of the range.
+//                            Wire formats unchanged again -- nL/nR/nP all
+//                            still go out 0-3200 absolute, re-centred at
+//                            transmit, because j4_stepper_neck turns each
+//                            into an absolute position homed off that axis's
+//                            MIN limit switch. The display packet's neck
+//                            slots are uint8_t and now map from the signed
+//                            range; left mapping from 0-3200 every negative
+//                            value would have wrapped to a large byte, the
+//                            same trap the eyes slots hit in v0_6_33.
+//                            Eye deadzone back to 6 from 10.
 //
 //
 //
@@ -1076,7 +1095,7 @@ int mapWindow(int raw, int rawLo, int rawHi, int outLo, int outHi) {
 #define FADER_FULL_SCALE    17560   // raw at 100% of fader travel
 #define FADER_L_RAW_BOTTOM  17560   // physical 0%  -> -2048
 #define FADER_L_RAW_TOP     10536   // physical 40% -> +2048
-#define FADER_L_OUT          2048
+#define FADER_L_OUT          1600
 #define FADER_R_RAW_BOTTOM      0   // physical 0%  ->     0
 #define FADER_R_RAW_TOP      7024   // physical 40% ->   255
 #define FADER_R_OUT           255
@@ -1093,7 +1112,7 @@ int mapWindow(int raw, int rawLo, int rawHi, int outLo, int outHi) {
 #define EYE_Y_AT_ZERO   117   // spring-centred
 #define EYE_Y_AT_PLUS   235   // top extreme -> +128
 #define EYE_OUT         128   // full-scale magnitude either side of zero
-#define EYE_DEADZONE     10   // output counts either side of 0 that read as 0
+#define EYE_DEADZONE      6   // output counts either side of 0 that read as 0
 #define EYE_STICKY_BAND   1   // see stickyBand(); 1 count of a 256 span
 
 // Map one joystick axis to -EYE_OUT..0..+EYE_OUT, each half on its own scale
@@ -1765,9 +1784,12 @@ void loop() {
   if (abs(neck_value - 1600) <= JOYSTICK_DEAD_ZONE) neck_value = 1600;
   if (abs(jaw_value  - 1600) <= JOYSTICK_DEAD_ZONE) jaw_value  = 1600;
 
-  // Neck mixer: Y sets base height, X steers left/right differentially
-  neck_left_value  = constrain(jaw_value + (neck_value - 1600), 0, 3200);
-  neck_right_value = constrain(jaw_value - (neck_value - 1600), 0, 3200);
+  // Neck mixer: Y sets base height, X steers left/right differentially.
+  // Both outputs are centre-zero (-1600..0..1600), so both joystick axes are
+  // offset to centre-zero before mixing rather than after; mixing in the
+  // 0-3200 domain and subtracting afterwards would clamp at the wrong ends.
+  neck_left_value  = constrain((jaw_value - 1600) + (neck_value - 1600), -1600, 1600);
+  neck_right_value = constrain((jaw_value - 1600) - (neck_value - 1600), -1600, 1600);
 
   xmitData.volume_xmit      = volume_value;
   xmitData.iris_xmit        = iris_value;
@@ -1780,8 +1802,12 @@ void loop() {
   xmitData.eyes_x_xmit      = constrain(eyes_x_value + 128, 0, 255);
   xmitData.eyes_y_xmit      = constrain(eyes_y_value + 128, 0, 255);
   xmitData.eye_pop_xmit     = eye_pop_value;
-  xmitData.neck_left_xmit   = neck_left_value;
-  xmitData.neck_right_xmit  = neck_right_value;
+  // neck-L/R are centre-zero here, but the wire stays the 0-3200 absolute
+  // that j4_stepper_neck turns into an absolute position (nL/nR halved, homed
+  // off the MIN limit switches). Same reasoning as nP below: signed on the
+  // wire would command negative positions and drive into the limit switches.
+  xmitData.neck_left_xmit   = constrain(neck_left_value  + 1600, 0, 3200);
+  xmitData.neck_right_xmit  = constrain(neck_right_value + 1600, 0, 3200);
   // neck_pivot is centre-zero (-2048..2048, straight off fader_left) inside
   // this board, but the wire format stays the absolute 0-3200 the receiver
   // forwards and j4_stepper_neck turns into an absolute position (nP/2, homed
@@ -2066,8 +2092,11 @@ void sendToXIAO() {
   // re-centre to 0-255 the same way the ESP-NOW packet does.
   pkt.left_arm   = (uint8_t)constrain(eyes_x_value + 128, 0, 255);
   pkt.right_arm  = (uint8_t)constrain(eyes_y_value + 128, 0, 255);
-  pkt.neck       = (uint8_t)map(neck_left_value,  0, 3200, 0, 255);
-  pkt.jaw        = (uint8_t)map(neck_right_value, 0, 3200, 0, 255);
+  // neck-L/R are centre-zero here and these slots are uint8_t, so map from
+  // the signed range: mapping from 0-3200 would send every negative value
+  // through as a wrapped, very large byte.
+  pkt.neck       = (uint8_t)constrain(map(neck_left_value,  -1600, 1600, 0, 255), 0, 255);
+  pkt.jaw        = (uint8_t)constrain(map(neck_right_value, -1600, 1600, 0, 255), 0, 255);
   pkt.bat1_mv    = bat1_mv;
   pkt.bat2_raw   = rcvData.battery_02_voltage_rcv;
   pkt.bat3_raw   = rcvData.battery_03_voltage_rcv;

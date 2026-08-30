@@ -15,7 +15,7 @@ Johnny 4 is a prop robot controlled wirelessly. This board is the handheld contr
 - Left keypad: jukebox-style audio phrase selection: press a letter (A-D) then a digit (0-9) to queue a phrase, or press a digit alone to queue a 0x phrase (e.g. pressing 8 queues "08.wav")
 - Right keypad: face presets. Tap a key to recall its saved face; hold a key 3 seconds to save the current face to it (j4_display_right shows a confirm prompt, * confirms). Faces persist on j4_talk's microSD and are re-loaded in the background whenever the talk link is up
 - Press `*` to send a STOP command, press `#` to clear the buffer
-- Mixes the joystick into differential neck-left / neck-right values over a 0-3200 range. Both axes are sticky-filtered at the source so a parked (spring-removed) stick holds dead still without giving up 1-count precision when moved slowly
+- Mixes the joystick into differential neck-left / neck-right values, both centre-zero (**-1600..0..1600**). Both axes are sticky-filtered at the source so a parked (spring-removed) stick holds dead still without giving up 1-count precision when moved slowly
 - Transmits all control data to the robot receiver via ESP-NOW (fixed-size packed structs, no `String` members so they survive the wireless `memcpy`)
 - Receives the jukebox file list from the robot receiver in chunks and forwards it to the display board; carries a `need_filelist` flag so the receiver re-sends the list if this board boots late
 - Answers `LIST?` requests from the display board out of its cached copy, so a display reboot recovers the list without a full round trip
@@ -157,7 +157,7 @@ ADS_04 @ 0x4B (ADDR -> SCL)                 neck-pivot + faders + Nose Basket
 | ADDR |  SCL  = address 0x4B
 | ALRT |  not connected
 | A0   |  NECK PIV pot -- DISABLED, read for display only (to be repurposed)
-| A1   |  fader_left wiper             -> neck pivot, sole source (-2048..0..2048)
+| A1   |  fader_left wiper             -> neck pivot, sole source (-1600..0..1600)
 | A2   |  fader_right wiper            -> iris (doubles j4_display_right IRIS), 0-255
 | A3   |  Nose Basket pot wiper        -> PCA9685 ch 11 (single source)
 +------+
@@ -182,7 +182,7 @@ Local, on the four ADS1115 modules over I2C:
 | ADS_03 (0x4A) | A2 | Bottom Eyelid L pot |
 | ADS_03 (0x4A) | A3 | Bottom Eyelid R pot |
 | ADS_04 (0x4B) | A0 | NECK PIV pot -- **disabled**, read for display only, awaiting a new use |
-| ADS_04 (0x4B) | A1 | fader_left (linear fader) -- sole source for the neck pivot, -2048..0..2048 over the bottom 40% of its travel |
+| ADS_04 (0x4B) | A1 | fader_left (linear fader) -- sole source for the neck pivot, -1600..0..1600 over the bottom 40% of its travel |
 | ADS_04 (0x4B) | A2 | fader_right (linear fader, doubles the IRIS pot), 0-255 over the bottom 40% of its travel |
 | ADS_04 (0x4B) | A3 | Nose Basket pot (up/down, single source) |
 
@@ -194,7 +194,7 @@ Each fader uses only the **bottom 40% of its mechanical travel**:
 
 | Fader | 0% (physical bottom) | 20% | 40% | past 40% |
 |-------|---------------------|-----|-----|----------|
-| fader_left (neck pivot) | -2048 | 0 | +2048 | stays +2048 |
+| fader_left (neck pivot) | -1600 | 0 | +1600 | stays +1600 |
 | fader_right (iris) | 0 | 127 | 255 | stays 255 |
 
 fader_left is mounted inverted relative to fader_right, so its physical bottom is the numerically *higher* raw count. That inversion is expressed by the endpoint order rather than a separate flag.
@@ -242,9 +242,9 @@ Simulated against +/-8 raw counts of ADC noise with the stick parked off-centre:
 
 ### Wire formats are unchanged
 
-Every one of these is a controller-side representation change. The ESP-NOW packet still carries eyes as 0-255 and `nP` as 0-3200 absolute, rescaled at transmit, so **j4_receiver and j4_stepper_neck need no reflash**. j4_stepper_neck turns `nP` into an absolute position (`nP/2`) homed off the MIN limit switch, so signed values on the wire would command negative positions and run the pivot into that switch.
+Every one of these is a controller-side representation change. The ESP-NOW packet still carries eyes as 0-255 and `nL` / `nR` / `nP` as 0-3200 absolute, rescaled at transmit, so **j4_receiver and j4_stepper_neck need no reflash**. j4_stepper_neck turns each of those into an absolute position (halved, homed off that axis's MIN limit switch), so signed values on the wire would command negative positions and run the axes into their limit switches.
 
-The display packet's eye slots are `uint8_t` and get the same re-centring; casting a signed value straight in would wrap it to the top of the range.
+The display packet's eye and neck slots are `uint8_t` and get the same re-centring; casting a signed value straight in would wrap it to the top of the range.
 
 ### Dual-source arbitration
 
