@@ -8,7 +8,7 @@ Johnny 4 is a prop robot controlled wirelessly. This board is the handheld contr
 
 ## What this firmware does
 
-- Reads analog potentiometers via four local ADS1115 ADC modules: the eyes joystick (eyes_x / eyes_y), the neck joystick (neck X / jaw Y), and the eight middle face pots (Eyebrow L/R, Basket Eyebrow L/R, Nose, Nose Basket, Bottom Eyelid L/R); the fourth module carries the neck-pivot pot, the two linear faders, and the Nose Basket pot
+- Reads analog potentiometers via four local ADS1115 ADC modules: the eyes joystick (eyes_x / eyes_y), the neck joystick (neck X / jaw Y), and the eight middle face pots (Eyebrow L/R, Basket Eyebrow L/R, Nose, Nose Basket, Bottom Eyelid L/R); the fourth module carries the two linear faders, the Nose Basket pot, and the disabled NECK PIV pot
 - Reads the four panel toggle switches (LASER, VENT, EYE POP, and the AUX toggle by the right joystick) on GPIOs 32/33/13/15 with internal pull-ups
 - Ingests four more pots (iris, color, brightness, volume) from [j4_display_right](https://github.com/kevinkevinlangelange/j4_display_right)'s dedicated ADS1115 over Serial2 as 25 Hz `P:` lines
 - Reads two 4x4 matrix keypads via PCF8574 I2C expanders using a custom scan routine
@@ -20,7 +20,7 @@ Johnny 4 is a prop robot controlled wirelessly. This board is the handheld contr
 - Receives the jukebox file list from the robot receiver in chunks and forwards it to the display board; carries a `need_filelist` flag so the receiver re-sends the list if this board boots late
 - Answers `LIST?` requests from the display board out of its cached copy, so a display reboot recovers the list without a full round trip
 - Displays live pot values, keypress state, and battery voltage on the built-in TFT. The default (data) screen reads: Keypad_L, Playing, VOL, Keypad_R, Eye-X, Eye-Y, Neck-L, Neck-R, Neck-PIV, then the STATUS line. Each keypad has its own last-key line
-- The TTGO's built-in button (GPIO 35) cycles the TFT through seven screens: live data, WiFi MAC address, a connection-status screen showing ESP-NOW LINK, j4_stepper_neck, j4_stepper_eyes, j4_talk, j4_display_left, and j4_display_right as CONNECTED (green) / DISCONNECTED (red), then four more showing each ADS1115 module's live raw pot counts (ADS_01 through ADS_04) for bench testing without a laptop on the I2C bus
+- The TTGO's built-in button (GPIO 35) cycles the TFT through seven screens: live data, WiFi MAC address, a connection-status screen showing ESP-NOW LINK, j4_stepper_neck, j4_stepper_eyes, j4_talk, j4_display_left, and j4_display_right as CONNECTED (green) / DISCONNECTED (red), then four more showing each ADS1115 module's live **raw** counts (ADS_01 through ADS_04) for bench testing and for calibrating fader windows and joystick centres without a laptop on the I2C bus
 - Sends a 49-byte binary status packet to the j4_display_left board at 25 fps over UART
 - Shows a STATUS line on the built-in TFT: "ONLINE" when the ESP-NOW link is up and the steppers are healthy, "OFFLINE" if no status packet arrives, or the reported stepper fault (e.g. "NL OT", "EYES OFFLINE"); green when healthy, red on any fault
 
@@ -116,8 +116,8 @@ ADS_01 @ 0x48 (ADDR -> GND)                 both joysticks
 | ALRT |  not connected
 | A0   |  neck joystick X wiper        -> neck L/R differential mix
 | A1   |  neck joystick Y (jaw) wiper  -> neck L/R base height
-| A2   |  eyes joystick X wiper        -> eyes pan servo  (PCA9685 ch 3)
-| A3   |  eyes joystick Y wiper        -> eyes tilt servo (PCA9685 ch 4)
+| A2   |  eyes joystick X wiper        -> eyes pan servo  (PCA9685 ch 3), -128..0..128
+| A3   |  eyes joystick Y wiper        -> eyes tilt servo (PCA9685 ch 4), -128..0..128
 +------+
 
 ADS_02 @ 0x49 (ADDR -> VDD)                 four face pots, left bank
@@ -156,9 +156,9 @@ ADS_04 @ 0x4B (ADDR -> SCL)                 neck-pivot + faders + Nose Basket
 | SDA  |  TTGO GPIO 21 (I2C SDA)
 | ADDR |  SCL  = address 0x4B
 | ALRT |  not connected
-| A0   |  neck-pivot pot wiper         -> nP on the stepper link (-1600..0..1600)
-| A1   |  fader_left wiper             -> neck pivot (doubles ADS_04 A0, inverted)
-| A2   |  fader_right wiper            -> iris (doubles j4_display_right IRIS)
+| A0   |  NECK PIV pot -- DISABLED, read for display only (to be repurposed)
+| A1   |  fader_left wiper             -> neck pivot, sole source (-2048..0..2048)
+| A2   |  fader_right wiper            -> iris (doubles j4_display_right IRIS), 0-255
 | A3   |  Nose Basket pot wiper        -> PCA9685 ch 11 (single source)
 +------+
 ```
@@ -181,25 +181,47 @@ Local, on the four ADS1115 modules over I2C:
 | ADS_03 (0x4A) | A1 | Faulty channel, unused (Nose Basket moved to ADS_04 A3) |
 | ADS_03 (0x4A) | A2 | Bottom Eyelid L pot |
 | ADS_03 (0x4A) | A3 | Bottom Eyelid R pot |
-| ADS_04 (0x4B) | A0 | Neck-pivot pot (silver knob below j4_display_left, -1600..0..1600) |
-| ADS_04 (0x4B) | A1 | fader_left (linear fader, doubles the neck-pivot pot, same scale, read inverted) |
-| ADS_04 (0x4B) | A2 | fader_right (linear fader, doubles the IRIS pot) |
+| ADS_04 (0x4B) | A0 | NECK PIV pot -- **disabled**, read for display only, awaiting a new use |
+| ADS_04 (0x4B) | A1 | fader_left (linear fader) -- sole source for the neck pivot, -2048..0..2048 over the bottom 40% of its travel |
+| ADS_04 (0x4B) | A2 | fader_right (linear fader, doubles the IRIS pot), 0-255 over the bottom 40% of its travel |
 | ADS_04 (0x4B) | A3 | Nose Basket pot (up/down, single source) |
 
 The eight face pots ride the ESP-NOW control packet to PCA9685 channels 6-13 on j4_receiver (Eyebrow L/R = ch 6/7, Basket Eyebrow L/R = ch 8/9, Nose = ch 10, Nose Basket = ch 11, Bottom Eyelid L/R = ch 12/13). The neck-pivot pot rides the packet in its own field and leaves the receiver as the `nP` slot of the stepper stream.
 
-### Centre-zero controls and jitter filtering
+### Fader travel windows
 
-The neck-pivot pot and fader_left are read centre-zero: **-1600 at minimum, 0 at the midpoint, +1600 at maximum**. fader_left is read inverted so that raising the fader and turning the pot drive the pivot the same direction. Everything else stays on its unsigned scale.
+Each fader uses only the **bottom 40% of its mechanical travel**:
 
-`processPotCentred()` filters these two, because an unfiltered ADC value wanders a few counts even when nothing is touched and every wander that survives the downstream threshold is a real motor step:
+| Fader | 0% (physical bottom) | 20% | 40% | past 40% |
+|-------|---------------------|-----|-----|----------|
+| fader_left (neck pivot) | -2048 | 0 | +2048 | stays +2048 |
+| fader_right (iris) | 0 | 127 | 255 | stays 255 |
 
-- **Deadband** (`POT_DEADBAND`, 30 counts): anything within this of centre reads exactly 0, so a control at rest commands a hard stop rather than a small standing offset.
-- **Sticky band** (`POT_STICKY_BAND`, 3 counts): see below. Entering the deadband always snaps to 0, so coming to rest never strands a residual.
+fader_left is mounted inverted relative to fader_right, so its physical bottom is the numerically *higher* raw count. That inversion is expressed by the endpoint order rather than a separate flag.
+
+The window is defined by **measured raw endpoints** (`FADER_L_RAW_BOTTOM` / `_TOP`, `FADER_R_RAW_BOTTOM` / `_TOP`), not by percentages of the ADC range. A fader's electrical span reaches neither the ADC rails nor the ends of its own mechanical travel, so the physical-to-raw relationship has to be measured. Assuming it was linear across the full ADC range is what left a stretch of dead motion at the bottom of fader_left's throw.
+
+**Calibrating a fader window.** Cycle the TFT to the ADS_04 screen, which shows raw counts. Park the fader at its physical bottom and read the FADER_L / FADER_R value: that is `_RAW_BOTTOM`. Move it to the 40% mark and read it again: that is `_RAW_TOP`. Put both in `main.cpp` and reflash. The two intermediate points (20% = centre) fall out of the linear map.
+
+### Eye joystick
+
+Both axes read centre-zero, **-128 at one extreme, 0 at spring-centre, +128 at the other**, with a small deadzone (`EYE_DEADZONE`) so neutral is exactly 0/0.
+
+The stick's electrical centre is not the midpoint of its travel, and the two halves of each axis are not the same width, so **each half is mapped on its own scale** from the measured calibration points (`EYE_X_AT_MINUS` / `_AT_ZERO` / `_AT_PLUS` and the Y equivalents). A single straight map across the whole axis would leave neutral off-zero and make one direction hit its endpoint before the other.
+
+Neutral now transmits 128, which is true servo centre. It previously transmitted the stick's own electrical centre (135), leaving the eyes slightly off-centre at rest.
+
+### Spike rejection
+
+`median3()` guards every control that drives motion (both neck axes, both eye axes, both faders) by taking the median of the last three **raw** samples.
+
+A dirty wiper momentarily reads somewhere else entirely, and a single bad sample is enough to fling a servo or stepper across its travel. A median discards any single-sample outlier completely, however far out it lands, while a genuine move passes straight through. An averaging or slew-limiting filter would instead smear every fast move in order to soften the rare bad one.
+
+The cost is exactly one sample of lag (40ms at the 25 Hz control rate), and a spike has to repeat on two consecutive samples to get through. Face pots are deliberately not filtered this way: a stray frame on an eyebrow is cosmetic, where the same frame on the neck is the robot lurching.
 
 ### Sticky band: stillness at rest without losing resolution
 
-`stickyBand()` is the anti-jitter filter used by the neck joystick axes and, inside `processPotCentred()`, by the neck pivot and fader_left.
+`stickyBand()` is the anti-jitter filter used by the neck joystick axes, the eye axes, and fader_left.
 
 The obvious filter -- "only report a new value once it has moved N counts, then jump to it" -- does stop jitter, but it also quantises real movement into N-sized steps, so inching a control makes the output hop N at a time instead of counting. That is unusable on an axis you want to move slowly and precisely.
 
@@ -214,15 +236,17 @@ The **neck joystick axes are filtered at the two axis reads, before the mixer**.
 
 Simulated against +/-8 raw counts of ADC noise with the stick parked off-centre: `neck_left` changes value **3990 times in 5000 reads unfiltered, and 0 times filtered**. A slow deliberate sweep still resolves 110 distinct values across a 111-count span, so the precision is intact.
 
-Unlike `processPot()`, this does not treat a low reading as a noise floor. That guard is free on an unsigned scale where 0 is also the bottom of travel, but here 0 is the centre, so it would make a pot turned fully to minimum snap to centre and lose the bottom of its travel.
+### Wire formats are unchanged
 
-**The ESP-NOW field stays 0-3200 absolute** and is re-centred at transmit. j4_stepper_neck turns `nP` into an absolute position (`nP/2`) homed off the MIN limit switch, so signed values on the wire would command negative positions and run the pivot into that switch. Keeping the wire contract also means j4_receiver and j4_stepper_neck need no reflash to match this build.
+Every one of these is a controller-side representation change. The ESP-NOW packet still carries eyes as 0-255 and `nP` as 0-3200 absolute, rescaled at transmit, so **j4_receiver and j4_stepper_neck need no reflash**. j4_stepper_neck turns `nP` into an absolute position (`nP/2`) homed off the MIN limit switch, so signed values on the wire would command negative positions and run the pivot into that switch.
 
-The two linear faders each double an existing rotary pot, arbitrated last-mover-wins: whichever control of the pair moved last (beyond a small claim threshold) is the active source and its value is used, so the two never fight. fader_right pairs with the IRIS pot on j4_display_right; fader_left pairs with the neck-pivot pot. A source that is absent (module unplugged, display feed down) can neither claim nor hold active status.
+The display packet's eye slots are `uint8_t` and get the same re-centring; casting a signed value straight in would wrap it to the top of the range.
 
-The claim threshold is per-pair rather than a single global constant, because the pairs are not on the same scale: the iris pair runs 0-255 and the neck-pivot pair spans 3200 counts (-1600..1600). A threshold has to be a similar fraction of travel on each (about 1.5%), so it is 4 counts for iris and 50 for neck pivot. A single 4-count threshold would be 0.125% of neck-pivot travel, inside the pots' own noise, and the pair would flip-flop between sources on noise alone.
+### Dual-source arbitration
 
-Both halves of the neck-pivot pair (rotary pot on A0, fader on A1) live on ADS_04, so losing that one module drops both sources at once; the value falls back to the 1600 centre rather than to a hard-over endpoint.
+Only the iris is arbitrated now: the IRIS pot on j4_display_right against fader_right, last-mover-wins (`dualPick()`). Whichever moved last beyond `DUAL_CLAIM_COUNTS` is the active source, so the two never fight, and a source that is absent can neither claim nor hold active status.
+
+The neck pivot no longer has a pair -- the NECK PIV pot is disabled and fader_left is its only source -- and Nose Basket is single-source as well.
 
 Remote, streamed from j4_display_right's dedicated ADS1115 (raw counts over Serial2, scaled here with the same `processPot()`):
 

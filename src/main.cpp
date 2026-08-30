@@ -25,7 +25,8 @@
 //          v0_6_30:  2026-08-29  -KL
 //          v0_6_31:  2026-08-29  -KL
 //          v0_6_32:  2026-08-29  -KL
-//   ver. increment:  20260829--014 (v0_6_32)
+//          v0_6_33:  2026-08-30  -KL
+//   ver. increment:  20260830--015 (v0_6_33)
 //
 //
 //           author:  Kevin Lange
@@ -339,6 +340,47 @@
 //                            block's module-absent branches reset them so a
 //                            returning module is not dragged out of a stale
 //                            value.
+//                 v0_6_33 -- Fader windows, eye joystick recentring, spike
+//                            rejection, NECK PIV pot disabled.
+//                            Both faders now use only the bottom 40% of their
+//                            mechanical travel: fader_left reads -2048 at 0%,
+//                            0 at 20%, +2048 at 40%; fader_right 0 / 127 / 255
+//                            across the same window. Past 40% each pins at its
+//                            high end. The window is defined by MEASURED raw
+//                            endpoints (FADER_*_RAW_BOTTOM/_TOP), not by
+//                            percentages of the ADC range, because a fader's
+//                            electrical span reaches neither the ADC rails nor
+//                            the ends of its own mechanical travel -- which is
+//                            what left dead motion at the bottom of fader_left.
+//                            THE SHIPPED ENDPOINTS ARE PLACEHOLDERS and must be
+//                            calibrated on the bench; the ADS screens now show
+//                            RAW counts so they can be read off directly.
+//                            NECK PIV pot (ADS_04 A0) is disabled as a control:
+//                            still read so its raw shows on screen for whatever
+//                            it gets repurposed to, but the neck pivot is driven
+//                            by fader_left alone, so that dual-source pair and
+//                            its claim threshold are gone. Iris is the only
+//                            arbitrated pair left.
+//                            Eye joystick is centre-zero -128..0..128 on both
+//                            axes, mapped per-half from the six measured
+//                            calibration points: its electrical centre is not
+//                            the midpoint of its travel and the halves differ
+//                            in width, so one straight map would put neutral
+//                            off-zero and reach one extreme early. Neutral now
+//                            transmits 128 = true servo centre (it used to send
+//                            the stick's 135). Small deadzone at neutral.
+//                            median3() rejects dirty-wiper spikes on the raw
+//                            counts of every motion control. A median drops any
+//                            single-sample outlier however far out it lands,
+//                            where averaging or slew-limiting would smear every
+//                            fast move to soften the rare bad one. Costs one
+//                            sample (40ms) of lag and nothing else.
+//                            Wire formats are all unchanged -- eyes still go out
+//                            0-255 and nP still 0-3200 absolute, rescaled at
+//                            transmit -- so no other board needs reflashing.
+//                            The display packet's eyes slots are uint8_t, so
+//                            they get the same re-centring; casting the signed
+//                            value straight in would have wrapped it.
 //
 //
 //
@@ -681,7 +723,18 @@ int neck_right_value = 0;
 // reaches the mixer as a couple of counts on neck-L and neck-R -- constant
 // physical stepper motion on a joystick nobody is touching.
 int neck_sticky = 1600, jaw_sticky = 1600;   // 0-3200 axes, centre 1600
-int np_sticky   = 0,    fl_sticky  = 0;      // centre-zero controls
+int fl_sticky   = 0;                         // fader_left, centre-zero
+int eyex_sticky = 0,    eyey_sticky = 0;     // eye joystick, centre-zero
+
+// (median3() filter state lives with median3() itself, further down --
+//  it needs the struct definition, which sits with the other input filters)
+
+// Last raw ADS1115 counts, [module 0-3][channel 0-3], -1 = not read this pass.
+// Shown on the per-module screens: raw is what you need to calibrate a fader
+// window or a joystick centre, and it is the only place raw is visible.
+int ads_raw[4][4] = {
+  { -1, -1, -1, -1 }, { -1, -1, -1, -1 }, { -1, -1, -1, -1 }, { -1, -1, -1, -1 }
+};
 int neck_pivot_value = 0;     // neck-pivot pot (ADS_04 A0), -1600..0..1600; 0 = centre/stop
 
 // Linear fader pots (ADS_04 A1/A2). Each doubles an existing rotary pot:
@@ -939,6 +992,90 @@ static inline int stickyBand(int v, int band, int &state) {
   return state;
 }
 
+// Spike rejection: median of the last three RAW samples.
+//
+// A dirty wiper momentarily reads somewhere else entirely, and one bad sample
+// is enough to fling a servo or stepper across its travel. A median throws
+// away ANY single-sample outlier completely, however far out it lands, while
+// a genuine move still passes through -- unlike an averaging or slew-limiting
+// filter, which would smear every fast move to soften the rare bad one.
+//
+// Cost is exactly one sample of lag (40ms at the 25Hz control rate), and only
+// on direction changes; a spike has to repeat on two consecutive samples to
+// get through. Filtered on the raw counts, upstream of everything else, so
+// nothing downstream ever sees the spike.
+struct Med3 { int s[3]; uint8_t n; };
+int median3(Med3 &m, int v) {
+  if (m.n < 3) { m.s[0] = m.s[1] = m.s[2] = v; m.n = 3; }   // first sight
+  else         { m.s[0] = m.s[1]; m.s[1] = m.s[2]; m.s[2] = v; }
+  int hi = max(m.s[0], max(m.s[1], m.s[2]));
+  int lo = min(m.s[0], min(m.s[1], m.s[2]));
+  return m.s[0] + m.s[1] + m.s[2] - hi - lo;   // the middle one
+}
+
+// One median3 state per control that drives motion (steppers and the eye
+// servos). Not used on the face pots -- a stray frame on an eyebrow is
+// cosmetic, where the same frame on the neck is the robot lurching.
+Med3 med_neckx, med_necky, med_eyex, med_eyey, med_fl, med_fr;
+
+// Map a raw ADC reading through a window defined by two MEASURED raw
+// endpoints, clamping outside it. rawLo may be numerically greater than rawHi
+// -- that is how an inverted (180-degree mounted) fader is expressed, so no
+// separate invert flag is needed.
+int mapWindow(int raw, int rawLo, int rawHi, int outLo, int outHi) {
+  long v = (long)(raw - rawLo) * (outHi - outLo) / (rawHi - rawLo) + outLo;
+  return constrain((int)v, min(outLo, outHi), max(outLo, outHi));
+}
+
+// Fader travel windows (raw ADS1115 counts).
+//
+// Only the bottom 40% of each fader's mechanical travel is used: 0% reads the
+// low end of the output range, 20% reads centre, 40% reads the high end, and
+// anything past 40% stays pinned at the high end.
+//
+// These are RAW endpoints rather than percentages of the ADC range on purpose.
+// A fader's electrical span does not necessarily reach the ADC rails and does
+// not necessarily cover its full mechanical travel, so the physical-to-raw
+// relationship has to be measured, not assumed. Read them off the ADS_04
+// screen (it shows raw counts): park the fader at its physical bottom for
+// _RAW_BOTTOM, and at the 40% mark for _RAW_TOP.
+//
+// fader_left is mounted inverted, hence BOTTOM > TOP.
+#define FADER_L_RAW_BOTTOM  17400   // physical 0%  -> -2048
+#define FADER_L_RAW_TOP     10440   // physical 40% -> +2048
+#define FADER_L_OUT          2048
+#define FADER_R_RAW_BOTTOM    200   // physical 0%  ->     0
+#define FADER_R_RAW_TOP      6960   // physical 40% ->   255
+#define FADER_R_OUT           255
+
+// Eye joystick calibration, in processPot 0-255 units, measured on the bench
+// 2026-08-30. The stick's electrical centre is not the midpoint of its travel
+// and the two halves are not the same width, so each half is mapped
+// separately -- a single straight map would put neutral off-zero and make one
+// direction reach its endpoint before the other.
+#define EYE_X_AT_MINUS  253   // left  extreme -> -128
+#define EYE_X_AT_ZERO   135   // spring-centred
+#define EYE_X_AT_PLUS    21   // right extreme -> +128
+#define EYE_Y_AT_MINUS   13   // bottom extreme -> -128
+#define EYE_Y_AT_ZERO   117   // spring-centred
+#define EYE_Y_AT_PLUS   235   // top extreme -> +128
+#define EYE_OUT         128   // full-scale magnitude either side of zero
+#define EYE_DEADZONE      6   // output counts either side of 0 that read as 0
+#define EYE_STICKY_BAND   1   // see stickyBand(); 1 count of a 256 span
+
+// Map one joystick axis to -EYE_OUT..0..+EYE_OUT, each half on its own scale
+// so `atZero` lands exactly on 0 and both extremes land exactly on full scale.
+int mapAxisCentred(int v, int atMinus, int atZero, int atPlus, int out) {
+  int r = (v == atZero) ? 0
+        : (atPlus > atMinus)                        // which way the axis runs
+            ? ((v > atZero) ? mapWindow(v, atZero, atPlus,  0,  out)
+                            : mapWindow(v, atZero, atMinus, 0, -out))
+            : ((v < atZero) ? mapWindow(v, atZero, atPlus,  0,  out)
+                            : mapWindow(v, atZero, atMinus, 0, -out));
+  if (abs(r) <= EYE_DEADZONE) r = 0;   // neutral must be dead silent
+  return r;
+}
+
 int processPotCentred(int raw, int half, bool invert, int &state) {
   int v;
   if (raw >= 65000) {
@@ -969,7 +1106,9 @@ int processPotCentred(int raw, int half, bool invert, int &state) {
 // it has to be a similar FRACTION of travel on each, or the coarse-scale pair
 // sits inside pot noise and flip-flops. ~1.5% of full travel on both.
 #define DUAL_CLAIM_COUNTS   4   // 0-255 scale (face pots, iris)
-#define DUAL_CLAIM_COUNTS_3200 50   // 3200-count span (neck pivot, -1600..1600)
+// (a second, coarser threshold lived here for the neck-pivot pair; that pair
+//  is gone now that the NECK PIV pot is disabled and fader_left is the only
+//  source, so iris is the only pair left and only the 0-255 threshold is used)
 
 // "Seen yet" is an explicit flag, not a -1 sentinel in lastA/lastB: the neck
 // pivot pair is centre-zero now, so -1 is an ordinary value just left of
@@ -983,7 +1122,6 @@ struct DualPot {
   int  claim;           // movement needed to take over, in this pair's units
 };
 DualPot dual_iris       = { 0, 0, false, false, false, DUAL_CLAIM_COUNTS };
-DualPot dual_neck_pivot = { 0, 0, false, false, false, DUAL_CLAIM_COUNTS_3200 };
 
 int dualPick(DualPot &d, int a, bool aOk, int b, bool bOk) {
   // The ACTIVE source's baseline tracks its value; the INACTIVE source's
@@ -1041,29 +1179,24 @@ AdsGuard adsg_02(ADS_02, 0x49);
 AdsGuard adsg_03(ADS_03, 0x4A);
 AdsGuard adsg_04(ADS_04, 0x4B);
 
-// Table driving the four ADS1115 pot-value screens (screen_mode 3-6), one
-// row per module so adsPotsDisplay() doesn't need four near-duplicate
-// functions. A null value pointer (ADS_03 A1, faulty) just prints "--".
+// Table driving the four ADS1115 screens (screen_mode 3-6), one row per
+// module so adsPotsDisplay() doesn't need four near-duplicate functions.
+//
+// These show RAW ADS1115 counts, not the processed values -- raw is what you
+// need to calibrate a fader window or a joystick centre, and this is the only
+// place it is visible. Channels that are not read print "--".
 struct AdsPotScreen {
   AdsGuard   &guard;
   const char *title;
+  uint8_t     module;        // index into ads_raw[][]
   const char *labels[4];
-  int        *values[4];
 };
 
 AdsPotScreen adsPotScreens[4] = {
-  { adsg_01, "ADS_01  0x48",
-    { "NECK X", "JAW Y", "EYES X", "EYES Y" },
-    { &neck_value, &jaw_value, &eyes_x_value, &eyes_y_value } },
-  { adsg_02, "ADS_02  0x49",
-    { "BROW L", "BROW R", "BBRW L", "BBRW R" },
-    { &eyebrow_l_value, &eyebrow_r_value, &basket_brow_l_value, &basket_brow_r_value } },
-  { adsg_03, "ADS_03  0x4A",
-    { "NOSE", "A1 FAULT", "EYELID L", "EYELID R" },
-    { &nose_value, nullptr, &eyelid_l_value, &eyelid_r_value } },
-  { adsg_04, "ADS_04  0x4B",
-    { "NECK PIV", "FADER L", "FADER R", "NOSE BK" },
-    { &neck_pivot_value, &fader_left_value, &fader_right_value, &nose_basket_value } },
+  { adsg_01, "ADS_01  0x48", 0, { "NECK X", "JAW Y", "EYES X", "EYES Y" } },
+  { adsg_02, "ADS_02  0x49", 1, { "BROW L", "BROW R", "BBRW L", "BBRW R" } },
+  { adsg_03, "ADS_03  0x4A", 2, { "NOSE", "A1 FAULT", "EYELID L", "EYELID R" } },
+  { adsg_04, "ADS_04  0x4B", 3, { "PIV OFF", "FADER L", "FADER R", "NOSE BK" } },
 };
 
 bool adsReady(AdsGuard &g) {
@@ -1416,67 +1549,97 @@ void loop() {
   // Each module is probed before its channels are read: readADC() on an
   // absent chip never returns (see adsReady()). ADS_04 (0x4B) is spare.
   if (adsReady(adsg_01)) {
+    // Every channel goes through median3() on the raw counts first, so a
+    // single dirty-wiper spike never reaches a servo or stepper.
+    ads_raw[0][0] = median3(med_neckx, ADS_01.readADC(0));   // neck joystick X
+    ads_raw[0][1] = median3(med_necky, ADS_01.readADC(1));   // neck joystick Y
+    ads_raw[0][2] = median3(med_eyex,  ADS_01.readADC(2));   // eyes joystick X
+    ads_raw[0][3] = median3(med_eyey,  ADS_01.readADC(3));   // eyes joystick Y
     // The two neck axes are sticky-filtered at the source, before the mixer,
     // so neck-L and neck-R both come out steady. Filtering the mixer outputs
     // instead would leave each axis free to jitter into the other.
-    neck_value      = stickyBand(processPot(ADS_01.readADC(0), 3200),  // neck joystick X
-                                 POT_STICKY_BAND, neck_sticky);
-    jaw_value       = stickyBand(processPot(ADS_01.readADC(1), 3200),  // neck joystick Y
-                                 POT_STICKY_BAND, jaw_sticky);
-    eyes_x_value    = processPot(ADS_01.readADC(2), 255);   // eyes joystick X
-    eyes_y_value    = processPot(ADS_01.readADC(3), 255);   // eyes joystick Y
+    neck_value   = stickyBand(processPot(ads_raw[0][0], 3200), POT_STICKY_BAND, neck_sticky);
+    jaw_value    = stickyBand(processPot(ads_raw[0][1], 3200), POT_STICKY_BAND, jaw_sticky);
+    // Eyes are centre-zero (-128..0..128) with their own deadzone at neutral.
+    eyes_x_value = stickyBand(mapAxisCentred(processPot(ads_raw[0][2], 255),
+                                             EYE_X_AT_MINUS, EYE_X_AT_ZERO, EYE_X_AT_PLUS, EYE_OUT),
+                              EYE_STICKY_BAND, eyex_sticky);
+    eyes_y_value = stickyBand(mapAxisCentred(processPot(ads_raw[0][3], 255),
+                                             EYE_Y_AT_MINUS, EYE_Y_AT_ZERO, EYE_Y_AT_PLUS, EYE_OUT),
+                              EYE_STICKY_BAND, eyey_sticky);
   } else {
-    eyes_x_value = eyes_y_value = 0;
+    eyes_x_value = eyes_y_value = 0;      // centre-zero: 0 = eyes centred
+    eyex_sticky  = eyey_sticky  = 0;
     neck_value   = jaw_value    = 1600;   // joystick centre, not hard-over
     neck_sticky  = jaw_sticky   = 1600;   // reset the filters with them
+    ads_raw[0][0] = ads_raw[0][1] = ads_raw[0][2] = ads_raw[0][3] = -1;
   }
   if (adsReady(adsg_02)) {
-    eyebrow_l_value     = processPot(ADS_02.readADC(0), 255);  // Eyebrow L
-    eyebrow_r_value     = processPot(ADS_02.readADC(1), 255);  // Eyebrow R
-    basket_brow_l_value = processPot(ADS_02.readADC(2), 255);  // Basket Eyebrow L
-    basket_brow_r_value = processPot(ADS_02.readADC(3), 255);  // Basket Eyebrow R
+    ads_raw[1][0] = ADS_02.readADC(0);
+    ads_raw[1][1] = ADS_02.readADC(1);
+    ads_raw[1][2] = ADS_02.readADC(2);
+    ads_raw[1][3] = ADS_02.readADC(3);
+    eyebrow_l_value     = processPot(ads_raw[1][0], 255);  // Eyebrow L
+    eyebrow_r_value     = processPot(ads_raw[1][1], 255);  // Eyebrow R
+    basket_brow_l_value = processPot(ads_raw[1][2], 255);  // Basket Eyebrow L
+    basket_brow_r_value = processPot(ads_raw[1][3], 255);  // Basket Eyebrow R
   } else {
     eyebrow_l_value = eyebrow_r_value = basket_brow_l_value = basket_brow_r_value = 0;
+    ads_raw[1][0] = ads_raw[1][1] = ads_raw[1][2] = ads_raw[1][3] = -1;
   }
   if (adsReady(adsg_03)) {
-    nose_value          = processPot(ADS_03.readADC(0), 255);  // Nose (up/down)
-    // A1 is faulty on this module and is left unread; Nose Basket moved to ADS_04 A3
-    eyelid_l_value      = processPot(ADS_03.readADC(2), 255);  // Bottom Eyelid L
-    eyelid_r_value      = processPot(ADS_03.readADC(3), 255);  // Bottom Eyelid R
+    ads_raw[2][0] = ADS_03.readADC(0);
+    ads_raw[2][1] = -1;   // A1 is faulty on this module and is left unread
+    ads_raw[2][2] = ADS_03.readADC(2);
+    ads_raw[2][3] = ADS_03.readADC(3);
+    nose_value          = processPot(ads_raw[2][0], 255);  // Nose (up/down)
+    eyelid_l_value      = processPot(ads_raw[2][2], 255);  // Bottom Eyelid L
+    eyelid_r_value      = processPot(ads_raw[2][3], 255);  // Bottom Eyelid R
   } else {
     nose_value = eyelid_l_value = eyelid_r_value = 0;
+    ads_raw[2][0] = ads_raw[2][1] = ads_raw[2][2] = ads_raw[2][3] = -1;
   }
   bool ads4_ok = adsReady(adsg_04);
   if (ads4_ok) {
-    // Neck pivot and fader_left are centre-zero (-1600..0..1600) and filtered
-    // for jitter; each needs its own filter state. fader_left is inverted so
-    // pushing it up and turning the pot up drive the pivot the same way.
-    neck_pivot_value  = processPotCentred(ADS_04.readADC(0), 1600, false, np_sticky);
-    fader_left_value  = processPotCentred(ADS_04.readADC(1), 1600, true,  fl_sticky);
-    fader_right_value = processPot(ADS_04.readADC(2), 255);   // fader_right -> iris
-    nose_basket_value = processPot(ADS_04.readADC(3), 255);   // Nose Basket (was ADS_03 A1)
+    // A0 is the old NECK PIV pot: DISABLED as a control, but still read so the
+    // ADS_04 screen can show it while it waits to be repurposed. The neck
+    // pivot is driven by fader_left alone now.
+    ads_raw[3][0] = ADS_04.readADC(0);
+    ads_raw[3][1] = median3(med_fl, ADS_04.readADC(1));
+    ads_raw[3][2] = median3(med_fr, ADS_04.readADC(2));
+    ads_raw[3][3] = ADS_04.readADC(3);
+    // Both faders use only the bottom 40% of their travel, mapped through
+    // measured raw endpoints. fader_left is centre-zero and mounted inverted
+    // (its BOTTOM endpoint is the numerically higher raw count).
+    fader_left_value  = stickyBand(mapWindow(ads_raw[3][1],
+                                             FADER_L_RAW_BOTTOM, FADER_L_RAW_TOP,
+                                             -FADER_L_OUT, FADER_L_OUT),
+                                   POT_STICKY_BAND, fl_sticky);
+    fader_right_value = mapWindow(ads_raw[3][2],
+                                  FADER_R_RAW_BOTTOM, FADER_R_RAW_TOP,
+                                  0, FADER_R_OUT);        // fader_right -> iris
+    nose_basket_value = processPot(ads_raw[3][3], 255);   // Nose Basket
   } else {
-    neck_pivot_value = fader_left_value = 0;   // centre-zero scale: 0 = stop
-    np_sticky        = fl_sticky        = 0;   // reset the filters with them
+    fader_left_value  = 0;   // centre-zero scale: 0 = stop
+    fl_sticky         = 0;   // reset the filter with it
     fader_right_value = nose_basket_value = 0;
+    ads_raw[3][0] = ads_raw[3][1] = ads_raw[3][2] = ads_raw[3][3] = -1;
   }
+  // Neck pivot now has exactly one source: fader_left. The NECK PIV pot is
+  // disabled, so there is no pair left to arbitrate.
+  neck_pivot_value = fader_left_value;
   // Remote pots from j4_display_right (same raw scale -> same processPot)
   bool dispR_ok    = (millis() - lastDisplayRMs < DISPLAY_TIMEOUT_MS);
   iris_value       = processPot(dispR_iris_raw, 255);
   color_value      = processPot(dispR_color_raw, 255);
   brightness_value = processPot(dispR_brightness_raw, 255);
   volume_value     = processPot(dispR_volume_raw, 100);
-  // Dual-control arbitration: iris = IRIS pot vs fader_right, neck pivot =
-  // neck-pivot pot vs fader_left. Last mover wins; see dualPick().
+  // Dual-control arbitration: iris = IRIS pot vs fader_right. Last mover
+  // wins; see dualPick(). The neck pivot no longer has a pair -- the NECK PIV
+  // pot is disabled and fader_left is its only source -- and Nose Basket is
+  // single-source too, so iris is the only pair left.
   iris_value        = dualPick(dual_iris, iris_value, dispR_ok,
                                fader_right_value, ads4_ok);
-  // Both neck-pivot sources live on ADS_04 (rotary A0, fader A1), so a
-  // missing ADS_04 takes out the pair together rather than one at a time;
-  // dualPick() then falls through to the pot's own 1600 centre value.
-  neck_pivot_value  = dualPick(dual_neck_pivot, neck_pivot_value, ads4_ok,
-                               fader_left_value, ads4_ok);
-  // Nose Basket is single-source again (rotary pot on ADS_04 A3) now that
-  // fader_left drives the neck pivot instead.
   // --- END ADC READS ---
 
   // Panel toggles: INPUT_PULLUP, switch closes to GND, so ON = LOW
@@ -1548,18 +1711,23 @@ void loop() {
   xmitData.iris_xmit        = iris_value;
   xmitData.color_xmit       = color_value;
   xmitData.brightness_xmit  = brightness_value;
-  xmitData.eyes_x_xmit      = eyes_x_value;
-  xmitData.eyes_y_xmit      = eyes_y_value;
+  // Eyes are centre-zero (-128..128) inside this board; the wire stays the
+  // 0-255 the receiver maps straight onto the pan/tilt servo pulse range.
+  // Neutral now lands on 128, i.e. true servo centre (it used to sit at the
+  // stick's electrical centre of 135, slightly off).
+  xmitData.eyes_x_xmit      = constrain(eyes_x_value + 128, 0, 255);
+  xmitData.eyes_y_xmit      = constrain(eyes_y_value + 128, 0, 255);
   xmitData.eye_pop_xmit     = eye_pop_value;
   xmitData.neck_left_xmit   = neck_left_value;
   xmitData.neck_right_xmit  = neck_right_value;
-  // neck_pivot is centre-zero (-1600..1600) inside this board, but the wire
-  // format stays the absolute 0-3200 the receiver forwards and j4_stepper_neck
-  // turns into an absolute position (nP/2, homed off the MIN limit switch).
-  // Sending the signed value raw would command negative positions and drive
-  // the pivot into its MIN limit, so re-centre here rather than changing the
-  // packet contract on three boards at once.
-  xmitData.neck_pivot_xmit  = constrain(neck_pivot_value + 1600, 0, 3200);
+  // neck_pivot is centre-zero (-2048..2048, straight off fader_left) inside
+  // this board, but the wire format stays the absolute 0-3200 the receiver
+  // forwards and j4_stepper_neck turns into an absolute position (nP/2, homed
+  // off the MIN limit switch). Sending the signed value raw would command
+  // negative positions and drive the pivot into its MIN limit, so rescale and
+  // re-centre here rather than changing the packet contract on three boards.
+  xmitData.neck_pivot_xmit  = constrain(map(neck_pivot_value, -FADER_L_OUT, FADER_L_OUT,
+                                            0, 3200), 0, 3200);
   xmitData.eyebrow_l_xmit     = eyebrow_l_value;
   xmitData.eyebrow_r_xmit     = eyebrow_r_value;
   xmitData.basket_brow_l_xmit = basket_brow_l_value;
@@ -1831,8 +1999,11 @@ void sendToXIAO() {
   pkt.volume     = (uint8_t)volume_value;
   pkt.eyes       = (uint8_t)iris_value;
   pkt.spot       = (uint8_t)map(eye_pop_value, 0, 3200, 0, 255);
-  pkt.left_arm   = (uint8_t)eyes_x_value;
-  pkt.right_arm  = (uint8_t)eyes_y_value;
+  // eyes_x/eyes_y are centre-zero here but these slots are uint8_t: casting a
+  // negative value straight in would wrap it to the top of the range, so
+  // re-centre to 0-255 the same way the ESP-NOW packet does.
+  pkt.left_arm   = (uint8_t)constrain(eyes_x_value + 128, 0, 255);
+  pkt.right_arm  = (uint8_t)constrain(eyes_y_value + 128, 0, 255);
   pkt.neck       = (uint8_t)map(neck_left_value,  0, 3200, 0, 255);
   pkt.jaw        = (uint8_t)map(neck_right_value, 0, 3200, 0, 255);
   pkt.bat1_mv    = bat1_mv;
@@ -2005,6 +2176,7 @@ void adsPotsDisplay(int idx) {
     tft.drawString(s.labels[i], 0, y, 2);
     tft.setTextColor(TFT_GREEN, TFT_BLACK);
     tft.fillRect(70, y, 65, 20, TFT_BLACK);
-    tft.drawString(s.values[i] ? String(*s.values[i]) : "--", 70, y, 2);
+    int raw = ads_raw[s.module][i];
+    tft.drawString(raw < 0 ? "--" : String(raw), 70, y, 2);
   }
 }
