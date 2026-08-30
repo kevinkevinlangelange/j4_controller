@@ -190,18 +190,20 @@ The eight face pots ride the ESP-NOW control packet to PCA9685 channels 6-13 on 
 
 ### Fader travel windows
 
-Each fader uses only the **bottom 40% of its mechanical travel**:
+Each fader uses a window at the bottom of its mechanical travel:
 
-| Fader | 0% (physical bottom) | 20% | 40% | past 40% |
-|-------|---------------------|-----|-----|----------|
-| fader_left (neck pivot) | -1600 | 0 | +1600 | stays +1600 |
-| fader_right (iris) | 0 | 127 | 255 | stays 255 |
+| Fader | raw at low end | raw at centre | raw at high end | past the window |
+|-------|---------------|---------------|-----------------|-----------------|
+| fader_left (neck pivot) | 17560 = **-1600** | 15000 = **0** | 12440 = **+1600** | stays +1600 |
+| fader_right (iris) | 0 = **0** | 3512 = **127** | 7024 = **255** | stays 255 |
+
+fader_left's window spans 5120 raw counts (about 29% of its mechanical travel), positioned so centre lands exactly on raw 15000. fader_right uses the bottom 40%.
 
 fader_left is mounted inverted relative to fader_right, so its physical bottom is the numerically *higher* raw count. That inversion is expressed by the endpoint order rather than a separate flag.
 
 The window is defined by **measured raw endpoints** (`FADER_L_RAW_BOTTOM` / `_TOP`, `FADER_R_RAW_BOTTOM` / `_TOP`), not by percentages of the ADC range. A fader's electrical span reaches neither the ADC rails nor the ends of its own mechanical travel, so the physical-to-raw relationship has to be measured. Assuming it was linear across the full ADC range is what left a stretch of dead motion at the bottom of fader_left's throw.
 
-**Calibrated 2026-08-30:** fader_left reads 17560 raw at its physical bottom, fader_right reads 0 at its. 17560 counts is 3.29V, so the faders span the full 3.3V rail end to end and the 40% endpoints are that span scaled (left 10536, right 7024).
+**Calibrated 2026-08-30:** fader_left reads 17560 raw at its physical bottom, fader_right reads 0 at its. 17560 counts is 3.29V, so the faders span the full 3.3V rail end to end. fader_left's window was then narrowed by hand to put centre on raw 15000, with equal 2560-count halves either side.
 
 **Recalibrating a fader window.** Cycle the TFT to the ADS_04 screen, which shows raw counts. Park the fader at its physical bottom and read the FADER L / FADER R value: that is `_RAW_BOTTOM`. Move it to the 40% mark and read it again: that is `_RAW_TOP`. Put both in `main.cpp` and reflash. The 20% (centre) point falls out of the linear map. Getting `_RAW_BOTTOM` wrong is what produces dead motion at the bottom of the throw: the output sits pinned at its endpoint until the raw count crosses it.
 
@@ -226,6 +228,8 @@ The cost is exactly one sample of lag (40ms at the 25 Hz control rate), and a sp
 ### Sticky band: stillness at rest without losing resolution
 
 `stickyBand()` is the anti-jitter filter used by the neck joystick axes, the eye axes, and fader_left.
+
+**The band has to be sized per control, against that control's own sensitivity.** A narrow window turns the same ADC noise into a bigger swing in output counts: fader_left gets about 1.6 raw counts per output count against 5.3 on a neck axis, so roughly 8 counts of raw noise is +/-1.5 output counts on the neck but +/-5 on the fader. fader_left therefore has its own `FADER_L_STICKY_BAND` (7) rather than sharing `POT_STICKY_BAND` (3). Simulated at that noise level the fader stops moving at rest from a band of 5 upward, and 7 leaves margin while costing 0.22% of travel in lag.
 
 The obvious filter -- "only report a new value once it has moved N counts, then jump to it" -- does stop jitter, but it also quantises real movement into N-sized steps, so inching a control makes the output hop N at a time instead of counting. That is unusable on an axis you want to move slowly and precisely.
 

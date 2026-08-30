@@ -28,7 +28,8 @@
 //          v0_6_33:  2026-08-30  -KL
 //          v0_6_34:  2026-08-30  -KL
 //          v0_6_35:  2026-08-30  -KL
-//   ver. increment:  20260830--017 (v0_6_35)
+//          v0_6_36:  2026-08-30  -KL
+//   ver. increment:  20260830--018 (v0_6_36)
 //
 //
 //           author:  Kevin Lange
@@ -425,6 +426,23 @@
 //                            value would have wrapped to a large byte, the
 //                            same trap the eyes slots hit in v0_6_33.
 //                            Eye deadzone back to 6 from 10.
+//                 v0_6_36 -- fader_left's window narrowed and recentred:
+//                            -1600 / 0 / +1600 now fall on raw 17560 / 15000
+//                            / 12440. The halves are equal (2560 counts each)
+//                            so centre lands exactly on 15000.
+//                            That window is 5120 raw counts against the old
+//                            7024, so the fader is now more sensitive: about
+//                            1.6 raw counts per output count where a neck
+//                            axis gets 5.3. The shared POT_STICKY_BAND was
+//                            sized for the wider window, so fader_left gets
+//                            its own FADER_L_STICKY_BAND, set to 7 by
+//                            simulation: the value stops moving at rest from
+//                            a band of 5 up, and 7 leaves margin while still
+//                            costing only 0.22% of travel in lag. The old
+//                            wider window was already marginal at the shared
+//                            band of 3 (440 changes per 3000 reads at rest),
+//                            so this fixes a latent problem rather than one
+//                            the narrowing introduced.
 //
 //
 //
@@ -1073,32 +1091,56 @@ int mapWindow(int raw, int rawLo, int rawHi, int outLo, int outHi) {
 
 // Fader travel windows (raw ADS1115 counts).
 //
-// Only the bottom 40% of each fader's mechanical travel is used: 0% reads the
-// low end of the output range, 20% reads centre, 40% reads the high end, and
-// anything past 40% stays pinned at the high end.
+// Each fader uses a window at the bottom of its mechanical travel: _RAW_BOTTOM
+// reads the low end of the output range, _RAW_TOP the high end, the midpoint
+// between them reads centre, and anything past _RAW_TOP stays pinned high.
 //
 // These are RAW endpoints rather than percentages of the ADC range on purpose.
 // A fader's electrical span does not necessarily reach the ADC rails and does
 // not necessarily cover its full mechanical travel, so the physical-to-raw
 // relationship has to be measured, not assumed. Read them off the ADS_04
-// screen (it shows raw counts): park the fader at its physical bottom for
-// _RAW_BOTTOM, and at the 40% mark for _RAW_TOP.
+// screen (it shows raw counts): park the fader at each end of the window you
+// want and note the count.
 //
 // fader_left is mounted inverted, hence BOTTOM > TOP.
 //
 // Measured 2026-08-30: fader_left reads 17560 at its physical bottom and
 // fader_right reads 0 at its. 17560 counts is 3.29V, i.e. the faders do span
-// the full 3.3V rail end to end, so the 40% points are that span scaled:
-// left  17560 -> 17560*0.6 = 10536, right 0 -> 17560*0.4 = 7024.
-// (Only the two BOTTOM figures were measured directly. If the 40% marks feel
-//  off on the bench, read the raw at the 40% mark and set _TOP from it.)
+// the full 3.3V rail end to end.
+//
+// fader_left's window was then narrowed by hand to put centre on a chosen raw
+// count: 17560 / 15000 / 12440 for -1600 / 0 / +1600. The two halves are the
+// same width (2560 counts each), so the midpoint falls exactly on 15000. That
+// window is 5120 counts, about 29% of the fader's travel rather than 40%, and
+// the extra sensitivity is why fader_left needs its own sticky band below.
+//
+// fader_right still uses the bottom 40% of travel: 0 / 7024 for 0 / 255.
 #define FADER_FULL_SCALE    17560   // raw at 100% of fader travel
-#define FADER_L_RAW_BOTTOM  17560   // physical 0%  -> -2048
-#define FADER_L_RAW_TOP     10536   // physical 40% -> +2048
+#define FADER_L_RAW_BOTTOM  17560   // -> -1600  (bottom of travel)
+#define FADER_L_RAW_CENTRE  15000   // ->     0  (midpoint, for reference)
+#define FADER_L_RAW_TOP     12440   // -> +1600
 #define FADER_L_OUT          1600
-#define FADER_R_RAW_BOTTOM      0   // physical 0%  ->     0
-#define FADER_R_RAW_TOP      7024   // physical 40% ->   255
+#define FADER_R_RAW_BOTTOM      0   // ->     0
+#define FADER_R_RAW_TOP      7024   // ->   255
 #define FADER_R_OUT           255
+
+// fader_left's window is narrower than the neck axes' full-scale span, so the
+// same raw noise turns into a bigger swing in output counts: about 1.6 raw
+// counts per output count here against 5.3 on a neck axis. The ~8 raw counts
+// of noise that show up as +/-1.5 counts on a neck axis are +/-5 counts here,
+// so the shared POT_STICKY_BAND of 3 cannot hold this fader still and it needs
+// its own, larger band.
+//
+// Simulated at 8 raw counts of noise across the window, the value stops moving
+// at rest from a band of 5 upward; 7 leaves margin for noisier days and still
+// costs only 0.22% of travel in lag, with a slow sweep resolving ~1150 distinct
+// values. Raise it if the pivot buzzes at rest, lower it if the fader feels
+// like it has slack near centre.
+//
+// The old, wider window was already marginal at the shared band of 3 (440
+// value changes per 3000 reads at rest in the same simulation), so this is
+// really a latent problem being fixed rather than one the narrowing created.
+#define FADER_L_STICKY_BAND   7
 
 // Eye joystick calibration, in processPot 0-255 units, measured on the bench
 // 2026-08-30. The stick's electrical centre is not the midpoint of its travel
@@ -1695,7 +1737,7 @@ void loop() {
     fader_left_value  = stickyBand(mapWindow(ads_raw[3][1],
                                              FADER_L_RAW_BOTTOM, FADER_L_RAW_TOP,
                                              -FADER_L_OUT, FADER_L_OUT),
-                                   POT_STICKY_BAND, fl_sticky);
+                                   FADER_L_STICKY_BAND, fl_sticky);
     fader_right_value = mapWindow(ads_raw[3][2],
                                   FADER_R_RAW_BOTTOM, FADER_R_RAW_TOP,
                                   0, FADER_R_OUT);        // fader_right -> iris
