@@ -29,7 +29,8 @@
 //          v0_6_34:  2026-08-30  -KL
 //          v0_6_35:  2026-08-30  -KL
 //          v0_6_36:  2026-08-30  -KL
-//   ver. increment:  20260830--018 (v0_6_36)
+//          v0_6_37:  2026-08-31  -KL
+//   ver. increment:  20260831--019 (v0_6_37)
 //
 //
 //           author:  Kevin Lange
@@ -443,6 +444,19 @@
 //                            band of 3 (440 changes per 3000 reads at rest),
 //                            so this fixes a latent problem rather than one
 //                            the narrowing introduced.
+//                 v0_6_37 -- Eighth screen: the fifth ADS1115 in the system,
+//                            the one on j4_display_right (IRIS, COLOR,
+//                            BRIGHTNESS, VOLUME). It is not on this board's
+//                            I2C bus, so its raw counts come from the "P:"
+//                            feed over Serial2 and CONNECTED means that feed
+//                            is fresh rather than that a chip ACKed. A stale
+//                            feed blanks the counts to "--" instead of
+//                            leaving the last values frozen and looking live.
+//                            IRIS shows the arbitrated value, so it can
+//                            disagree with this pot's own raw while
+//                            fader_right is the active source -- that
+//                            disagreement is the quickest read on which
+//                            source currently owns the channel.
 //
 //
 //
@@ -745,10 +759,11 @@ unsigned long lastDisplayRMs = 0;
 #define DISPLAY_TIMEOUT_MS  3000
 
 // Screen cycling via the TTGO's built-in button on GPIO 35 (same as j4_receiver).
-// 0 = data, 1 = MAC address, 2 = connection status, 3-6 = live ADS1115 pot
-// counts (one screen per module, ADS_01 through ADS_04).
+// 0 = data, 1 = MAC address, 2 = connection status, 3-7 = live ADS1115 pot
+// counts (one screen per module: ADS_01 through ADS_04, then the fifth
+// ADS1115 in the system, the one on j4_display_right, via its "P:" feed).
 #define SCREEN_BUTTON  35
-#define NUM_SCREENS    7
+#define NUM_SCREENS    8
 int  screen_mode = 0;
 bool screen_button_prev = HIGH;
 unsigned long screen_button_previousMillis = 0;
@@ -791,11 +806,14 @@ int eyex_sticky = 0,    eyey_sticky = 0;     // eye joystick, centre-zero
 // (median3() filter state lives with median3() itself, further down --
 //  it needs the struct definition, which sits with the other input filters)
 
-// Last raw ADS1115 counts, [module 0-3][channel 0-3], -1 = not read this pass.
+// Last raw ADS1115 counts, [module][channel], -1 = not read this pass.
+// Modules 0-3 are this board's own; module 4 is the fifth ADS1115 in the
+// system, the one on j4_display_right, whose counts arrive over Serial2.
 // Shown on the per-module screens: raw is what you need to calibrate a fader
 // window or a joystick centre, and it is the only place raw is visible.
-int ads_raw[4][4] = {
-  { -1, -1, -1, -1 }, { -1, -1, -1, -1 }, { -1, -1, -1, -1 }, { -1, -1, -1, -1 }
+int ads_raw[5][4] = {
+  { -1, -1, -1, -1 }, { -1, -1, -1, -1 }, { -1, -1, -1, -1 },
+  { -1, -1, -1, -1 }, { -1, -1, -1, -1 }
 };
 int neck_pivot_value = 0;     // neck-pivot pot (ADS_04 A0), -1600..0..1600; 0 = centre/stop
 
@@ -1298,8 +1316,11 @@ AdsGuard adsg_04(ADS_04, 0x4B);
 // The two neck channels are the one place the pairing is not one-to-one: X
 // and Y are mixed into neck-L and neck-R together, so rather than invent a
 // per-axis destination the screen shows one mixed output under each.
+// guard is null for the module that is not on this board's I2C bus: the fifth
+// ADS1115 lives on j4_display_right, so its "present" test is the freshness of
+// that board's serial feed rather than an I2C ACK.
 struct AdsPotScreen {
-  AdsGuard   &guard;
+  AdsGuard   *guard;
   const char *title;
   uint8_t     module;        // index into ads_raw[][]
   const char *labels[4];     // channel name, beside the raw count
@@ -1307,23 +1328,32 @@ struct AdsPotScreen {
   int        *values[4];     // processed value (nullptr = channel not in use)
 };
 
-AdsPotScreen adsPotScreens[4] = {
-  { adsg_01, "ADS_01  0x48", 0,
+AdsPotScreen adsPotScreens[5] = {
+  { &adsg_01, "ADS_01  0x48", 0,
     { "NECK X", "NECK Y", "EYES X", "EYES Y" },
     { "NECK-L", "NECK-R", "EYE-X",  "EYE-Y"  },
     { &neck_left_value, &neck_right_value, &eyes_x_value, &eyes_y_value } },
-  { adsg_02, "ADS_02  0x49", 1,
+  { &adsg_02, "ADS_02  0x49", 1,
     { "BROW L", "BROW R", "BBRW L", "BBRW R" },
     { "PCA 6",  "PCA 7",  "PCA 8",  "PCA 9"  },
     { &eyebrow_l_value, &eyebrow_r_value, &basket_brow_l_value, &basket_brow_r_value } },
-  { adsg_03, "ADS_03  0x4A", 2,
+  { &adsg_03, "ADS_03  0x4A", 2,
     { "NOSE",   "A1 FAULT", "EYELID L", "EYELID R" },
     { "PCA 10", "OFF",      "PCA 12",   "PCA 13"   },
     { &nose_value, nullptr, &eyelid_l_value, &eyelid_r_value } },
-  { adsg_04, "ADS_04  0x4B", 3,
+  { &adsg_04, "ADS_04  0x4B", 3,
     { "PIV OFF", "FADER L",  "FADER R", "NOSE BK" },
     { "OFF",     "NECK PIV", "IRIS",    "PCA 11"  },
     { nullptr, &neck_pivot_value, &iris_value, &nose_basket_value } },
+  // The fifth ADS1115: on j4_display_right, not on this board's bus. Raw
+  // counts arrive over Serial2 as "P:" lines, so CONNECTED here means that
+  // feed is fresh. IRIS is the arbitrated result and can disagree with this
+  // pot's own raw when fader_right is the active source -- that disagreement
+  // is the quickest way to see which one currently owns the channel.
+  { nullptr, "DISP_R  0x48", 4,
+    { "IRIS",  "COLOR",  "BRIGHT", "VOLUME" },
+    { "PCA 5", "WS2812", "WS2812", "TALK"   },
+    { &iris_value, &color_value, &brightness_value, &volume_value } },
 };
 
 bool adsReady(AdsGuard &g) {
@@ -1753,6 +1783,16 @@ void loop() {
   neck_pivot_value = fader_left_value;
   // Remote pots from j4_display_right (same raw scale -> same processPot)
   bool dispR_ok    = (millis() - lastDisplayRMs < DISPLAY_TIMEOUT_MS);
+  // Mirror those raw counts into the screen table as module 4. Stale feed
+  // shows "--" rather than the last values frozen on screen looking live.
+  if (dispR_ok) {
+    ads_raw[4][0] = dispR_iris_raw;
+    ads_raw[4][1] = dispR_color_raw;
+    ads_raw[4][2] = dispR_brightness_raw;
+    ads_raw[4][3] = dispR_volume_raw;
+  } else {
+    ads_raw[4][0] = ads_raw[4][1] = ads_raw[4][2] = ads_raw[4][3] = -1;
+  }
   iris_value       = processPot(dispR_iris_raw, 255);
   color_value      = processPot(dispR_color_raw, 255);
   brightness_value = processPot(dispR_brightness_raw, 255);
@@ -2227,13 +2267,13 @@ void tftDisplayUpdate() {
   } else if (screen_mode == 2) {
     connectionDisplay();
   } else {
-    adsPotsDisplay(screen_mode - 3);   // 3-6: ADS_01 .. ADS_04
+    adsPotsDisplay(screen_mode - 3);   // 3-7: ADS_01..ADS_04, then DISP_R
   }
 }
 
 
 // Cycle screens with the TTGO's built-in GPIO 35 button:
-// data -> MAC -> status -> ADS_01 pots -> ADS_02 pots -> ADS_03 pots -> ADS_04 pots.
+// data -> MAC -> status -> ADS_01..ADS_04 pots -> j4_display_right's ADS1115.
 void controllerScreenModeDetect() {
   if (millis() - screen_button_previousMillis >= screen_debounce_ms) {
     bool cur = digitalRead(SCREEN_BUTTON);
@@ -2296,7 +2336,10 @@ void connectionDisplay() {
 // the same adsReady() guard the control-tx loop already probes with.
 void adsPotsDisplay(int idx) {
   AdsPotScreen &s = adsPotScreens[idx];
-  bool ok = adsReady(s.guard);
+  // Local modules ACK on I2C; the remote one is "present" while its serial
+  // feed is fresh.
+  bool ok = s.guard ? adsReady(*s.guard)
+                    : (millis() - lastDisplayRMs < DISPLAY_TIMEOUT_MS);
 
   tft.setTextColor(TFT_WHITE, TFT_BLACK);
   tft.drawString(s.title, 6, 4, 2);
