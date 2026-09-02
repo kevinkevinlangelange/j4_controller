@@ -30,7 +30,8 @@
 //          v0_6_35:  2026-08-30  -KL
 //          v0_6_36:  2026-08-30  -KL
 //          v0_6_37:  2026-08-31  -KL
-//   ver. increment:  20260831--019 (v0_6_37)
+//          v0_6_38:  2026-09-02  -KL
+//   ver. increment:  20260902--020 (v0_6_38)
 //
 //
 //           author:  Kevin Lange
@@ -457,6 +458,17 @@
 //                            fader_right is the active source -- that
 //                            disagreement is the quickest read on which
 //                            source currently owns the channel.
+//                 v0_6_38 -- Send the arbitrated iris to j4_display_right as
+//                            "I:<0-255>" on the same 25 Hz gate as the control
+//                            packet. Its IRIS bar sits above the IRIS pot but
+//                            the pot is only half the pair: fader_right lives
+//                            here, and dualPick() above is the only place the
+//                            last-mover-wins result exists. Without this the
+//                            bar could only ever show its own pot and would
+//                            sit still while fader_right drove the servo.
+//                            Sent after the face-preset overlay, so a recalled
+//                            face shows on the bar too. Fire and forget: the
+//                            display falls back to its own pot if this stops.
 //
 //
 //
@@ -1913,6 +1925,14 @@ void loop() {
   xmitData.need_filelist_xmit = jukeboxReady ? 0 : 1;
   xmitData.display_l_ok_xmit  = (millis() - lastDisplayMs  < DISPLAY_TIMEOUT_MS) ? 1 : 0;
   xmitData.display_r_ok_xmit  = (millis() - lastDisplayRMs < DISPLAY_TIMEOUT_MS) ? 1 : 0;
+
+  // Arbitrated iris to j4_display_right, so its IRIS bar follows whichever of
+  // the pair moved last. The IRIS pot is on that board, fader_right is on this
+  // one, and dualPick() above is the only place the winner is known. This is
+  // post-overlay, so a recalled face shows on the bar as well. Fire and forget
+  // from loop context, like faceMsg(): if the display is unplugged the bytes
+  // fall on the floor and it reverts to drawing its own pot.
+  Serial2.printf("I:%d\n", constrain(iris_value, 0, 255));
 
   esp_now_send(broadcastAddress, (uint8_t *)&xmitData, sizeof(xmitData));
 
