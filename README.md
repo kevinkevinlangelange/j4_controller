@@ -13,7 +13,7 @@ Johnny 4 is a prop robot controlled wirelessly. This board is the handheld contr
 - Ingests four more pots (iris, color, brightness, volume) from [j4_display_right](https://github.com/kevinkevinlangelange/j4_display_right)'s dedicated ADS1115 over Serial2 as 25 Hz `P:` lines
 - Reads two 4x4 matrix keypads via PCF8574 I2C expanders using a custom scan routine
 - Left keypad: jukebox-style audio phrase selection: press a letter (A-D) then a digit (0-9) to queue a phrase, or press a digit alone to queue a 0x phrase (e.g. pressing 8 queues "08.wav")
-- Right keypad: face presets. Tap a key to recall its saved face; hold a key 3 seconds to save the current face to it (j4_display_right shows a confirm prompt, * confirms). Faces persist on j4_talk's microSD and are re-loaded in the background whenever the talk link is up
+- Right keypad: face presets. Tap a key to recall its saved face; hold a key 3 seconds to save the current face to it (j4_display_right shows a confirm prompt, * confirms). Faces persist in this board's own NVS flash, so a save is durable immediately and recall works with every other board unplugged; j4_talk's microSD is kept as a mirror
 - Press `*` to send a STOP command, press `#` to clear the buffer
 - Mixes the joystick into differential neck-left / neck-right values, both centre-zero (**-1600..0..1600**). Both axes are sticky-filtered at the source so a parked (spring-removed) stick holds dead still without giving up 1-count precision when moved slowly
 - Transmits all control data to the robot receiver via ESP-NOW (fixed-size packed structs, no `String` members so they survive the wireless `memcpy`)
@@ -332,11 +332,24 @@ On the **right keypad**:
 - **Tap a key**: recall that key's saved face. Every face channel jumps to the saved value and holds there; turning any face pot takes just that channel back (frozen-baseline takeover, so even a slow turn works), and flipping a toggle takes that toggle back. The rest of the face stays put.
 - **Hold a key for 3 seconds** (any key except `*`): j4_display_right shows "SAVE FACE ON `<key>`? PRESS * TO CONFIRM". `*` saves, any other key cancels, and an unanswered prompt times out after 10 seconds.
 
-Faces persist in `FACES.TXT` on j4_talk's microSD, so they survive power-off. The sync is fully background and never blocks anything:
+### Where faces are stored
+
+Faces live in **this board's own NVS flash partition**, written at runtime with the `Preferences` library. 16 slots at 24 bytes each is 384 bytes against the default table's 20KB `nvs` partition, so the whole set fits about fifty times over.
+
+NVS is authoritative, and that is the point: a save is durable the instant `*` is pressed, with no round trip to any other board. There is no pending state to reason about, and recall works with every other board in the system unplugged.
+
+Writes happen only on a save, on a mirror acknowledgement, and once on migration, so flash wear is a non-issue even before NVS's own wear levelling. The stored blob carries a version byte plus `FACE_SLOTS` and `FACE_VALUES`, so changing either is detected on load and treated as "nothing stored" rather than reinterpreted as garbage.
+
+Normal firmware uploads leave NVS alone. `pio run -t erase` and changes to the partition table both wipe it.
+
+### The j4_talk SD mirror
+
+The older `FACES.TXT` path on j4_talk's microSD is deliberately still running, as a mirror rather than the source of truth, so local storage can be verified against it before the Teensy path is cut:
 
 - After boot (or whenever the talk link appears) this board re-requests the saved-face dump every 2.5s until a complete one lands.
-- A save made while j4_talk is offline stays in RAM flagged dirty ("PENDING SD" on the display) and is pushed automatically when the link comes up; the display shows "FACE `<key>` ON SD" when the Teensy confirms the write.
-- If the Teensy reports an SD write failure, the face stays usable in RAM for the session and auto-retry stops until it is re-saved.
+- **An incoming dump may only populate a controller whose NVS was empty at boot.** That is the one-time migration of an existing `FACES.TXT`, and it persists itself to NVS on completion ("FACES MIGRATED / SD -> CONTROLLER"). Once anything is stored locally, the SD never overwrites it.
+- A save made while j4_talk is offline is already safe in NVS; it stays flagged dirty and is pushed to the SD when the link comes up. The display shows "FACE `<key>` ON SD" when the Teensy confirms.
+- If the Teensy reports an SD write failure, nothing is lost: the face is in NVS regardless, and auto-retry stops until it is re-saved. A reboot clears the failure flag so the mirror retries.
 
 Slots are keyed by the keypad **character**, so re-deriving a keymap keeps every saved face on the same printed key. 15 keys are usable as slots (`*` is the confirm key). Face traffic is its own ESP-NOW packet type (0x04) translated by j4_receiver to text lines on the Teensy UART; see those repos for the protocol.
 

@@ -31,7 +31,8 @@
 //          v0_6_36:  2026-08-30  -KL
 //          v0_6_37:  2026-08-31  -KL
 //          v0_6_38:  2026-09-02  -KL
-//   ver. increment:  20260902--020 (v0_6_38)
+//          v0_6_39:  2026-09-09  -KL
+//   ver. increment:  20260909--021 (v0_6_39)
 //
 //
 //           author:  Kevin Lange
@@ -469,6 +470,26 @@
 //                            Sent after the face-preset overlay, so a recalled
 //                            face shows on the bar too. Fire and forget: the
 //                            display falls back to its own pot if this stops.
+//                 v0_6_39 -- Saved faces now live in this board's own NVS
+//                            flash partition, written at runtime with the
+//                            Preferences library. 16 slots x 24 bytes is 384
+//                            bytes against a 20KB default NVS partition, so
+//                            the whole set fits about fifty times over.
+//                            NVS is authoritative. A save is durable the
+//                            instant the key is pressed, with no round trip
+//                            to the Teensy, so there is no "PENDING SD" state
+//                            to reason about and a recall works with every
+//                            other board in the system unplugged.
+//                            The j4_talk SD mirror is deliberately left
+//                            running so this can be verified against it
+//                            before the Teensy path is cut. An incoming dump
+//                            may only populate a controller whose NVS was
+//                            empty at boot, which is the one-time migration
+//                            of an existing FACES.TXT; after that the SD
+//                            never overwrites local. Stored blob carries a
+//                            version plus FACE_SLOTS/FACE_VALUES, so changing
+//                            either is detected rather than reinterpreted as
+//                            garbage.
 //
 //
 //
@@ -577,6 +598,7 @@
 #include <SPI.h>
 #include <Arduino.h>
 #include <esp_now.h>
+#include <Preferences.h>
 #include <esp_wifi.h>
 #include <WiFi.h>
 #include "kevco_labs_logo_02.h" // 135 x 37 pixels
@@ -886,6 +908,15 @@ struct FaceSlot {
   uint8_t toggles;     // bit 0 LASER, 1 VENT, 2 EYE POP
 };
 FaceSlot faces[FACE_SLOTS];
+
+// Faces live in this board's own NVS flash partition, written at runtime. The
+// whole set is 16 slots x 24 bytes, so it fits the default 20KB NVS partition
+// about fifty times over. NVS is authoritative: a save is durable the instant
+// it happens, with no round trip to the Teensy and nothing to go stale if talk
+// is offline. The j4_talk SD mirror still runs alongside it.
+#define FACE_NVS_NS   "j4faces"
+#define FACE_NVS_VER  1
+bool          faces_from_nvs = false;  // NVS held at least one face at boot
 
 bool          faces_synced   = false;  // true once a complete SD dump landed
 uint8_t       faceDumpCount  = 0;      // FACE_OP_DATA packets since last REQ
@@ -1429,6 +1460,40 @@ bool talkLinkUp() {
       && rcvData.talk_ok_rcv;
 }
 
+// Persist every slot as one blob. Saves are user actions, a handful a session,
+// so write frequency is a non-issue and NVS wear levelling covers it anyway.
+void facesSaveNVS() {
+  Preferences p;
+  if (!p.begin(FACE_NVS_NS, false)) return;   // read-write
+  p.putUChar("ver",   FACE_NVS_VER);
+  p.putUChar("slots", FACE_SLOTS);
+  p.putUChar("vals",  FACE_VALUES);
+  p.putBytes("blob",  faces, sizeof(faces));
+  p.end();
+}
+
+// Read them back at boot. The version/geometry keys mean a future change to
+// FACE_SLOTS or FACE_VALUES is detected rather than reinterpreted as garbage:
+// a mismatch is treated as "nothing stored" and the slots stay empty.
+void facesLoadNVS() {
+  Preferences p;
+  if (!p.begin(FACE_NVS_NS, true)) return;    // read-only; absent namespace = empty
+  bool ok = p.getUChar("ver",   0) == FACE_NVS_VER
+         && p.getUChar("slots", 0) == FACE_SLOTS
+         && p.getUChar("vals",  0) == FACE_VALUES
+         && p.getBytesLength("blob") == sizeof(faces);
+  if (ok) {
+    p.getBytes("blob", faces, sizeof(faces));
+    for (uint8_t i = 0; i < FACE_SLOTS; i++) {
+      // A write error on the Teensy should not survive a reboot: let the
+      // mirror retry. dirty is kept, so an offline save still syncs later.
+      faces[i].sd_failed = false;
+      if (faces[i].valid) faces_from_nvs = true;
+    }
+  }
+  p.end();
+}
+
 FaceSlot *faceFind(char kc) {
   for (uint8_t i = 0; i < FACE_SLOTS; i++)
     if (faces[i].key == kc) return &faces[i];
@@ -1490,9 +1555,12 @@ void faceSaveConfirmed() {
   f->toggles = (laser_toggle   << TOGGLE_BIT_LASER)
              | (vent_toggle    << TOGGLE_BIT_VENT)
              | (eye_pop_toggle << TOGGLE_BIT_EYE_POP);
+  // Durable before the message is even drawn. Nothing here depends on talk.
+  facesSaveNVS();
+  faces_from_nvs = true;
   char l1[24];
   snprintf(l1, sizeof(l1), "FACE SAVED ON %c", kc);
-  faceMsg(l1, talkLinkUp() ? "WRITING TO SD..." : "PENDING SD: TALK OFFLINE", 2500);
+  faceMsg(l1, "STORED IN CONTROLLER", 2500);
 }
 
 void faceRecall(char kc) {
@@ -1539,7 +1607,11 @@ void processFacePackets() {
 
     if (pkt.op == FACE_OP_DATA) {
       faceDumpCount++;
-      FaceSlot *f = faceAlloc((char)pkt.key);
+      // NVS is authoritative. The dump may only populate a controller whose
+      // NVS was empty at boot, which is the one-time migration of an existing
+      // FACES.TXT. Once anything is stored locally the SD is a mirror and its
+      // contents never overwrite ours.
+      FaceSlot *f = faces_from_nvs ? NULL : faceAlloc((char)pkt.key);
       // A locally-dirty slot is newer than the SD copy -- keep ours, it will
       // be pushed by the dirty timer and come back clean.
       if (f && !f->dirty) {
@@ -1556,9 +1628,20 @@ void processFacePackets() {
       // stay unsynced and the REQ timer asks again (idempotent).
       faces_synced = (faceDumpCount == (uint8_t)pkt.v[0]);
 
+      // One-time migration: a complete dump landed on a controller with empty
+      // NVS. Persist it, and from here on NVS owns the faces.
+      if (faces_synced && !faces_from_nvs && faceDumpCount > 0) {
+        for (uint8_t i = 0; i < FACE_SLOTS; i++)
+          if (faces[i].valid) faces_from_nvs = true;
+        if (faces_from_nvs) {
+          facesSaveNVS();
+          faceMsg("FACES MIGRATED", "SD -> CONTROLLER", 2500);
+        }
+      }
+
     } else if (pkt.op == FACE_OP_ACK) {
       FaceSlot *f = faceFind((char)pkt.key);
-      if (f) f->dirty = false;
+      if (f) { f->dirty = false; facesSaveNVS(); }   // do not re-push after a reboot
       snprintf(l1, sizeof(l1), "FACE %c ON SD", (char)pkt.key);
       faceMsg(l1, "", 1500);
 
@@ -1573,6 +1656,11 @@ void processFacePackets() {
 
 
 void setup() {
+  // Saved faces, straight out of this board's NVS flash. Runs before anything
+  // that can touch the slots, so a recall works with every other board in the
+  // system unplugged and without waiting on an SD dump.
+  facesLoadNVS();
+
   Wire.begin(SDA, SCL);
   // Cap each I2C transaction. With no modules attached the bus has no
   // pull-ups and a transaction eats driver timeout + recovery instead of a
