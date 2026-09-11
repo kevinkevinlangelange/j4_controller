@@ -13,7 +13,7 @@ Johnny 4 is a prop robot controlled wirelessly. This board is the handheld contr
 - Ingests four more pots (iris, color, brightness, volume) from [j4_display_right](https://github.com/kevinkevinlangelange/j4_display_right)'s dedicated ADS1115 over Serial2 as 25 Hz `P:` lines
 - Reads two 4x4 matrix keypads via PCF8574 I2C expanders using a custom scan routine
 - Left keypad: jukebox-style audio phrase selection: press a letter (A-D) then a digit (0-9) to queue a phrase, or press a digit alone to queue a 0x phrase (e.g. pressing 8 queues "08.wav")
-- Right keypad: face presets. Tap a key to recall its saved face; hold a key 3 seconds to save the current face to it (j4_display_right shows a confirm prompt, * confirms). Faces persist in this board's own NVS flash, so a save is durable immediately and recall works with every other board unplugged; j4_talk's microSD is kept as a mirror
+- Right keypad: face presets. Tap a key to recall its saved face; hold a key 3 seconds to save the current face to it (j4_display_right shows a confirm prompt, * confirms). Faces live on the microSD on j4_display_right's TFT module, with a cache in this board's NVS flash so saves are immediate and recall works with that board unplugged
 - Press `*` to send a STOP command, press `#` to clear the buffer
 - Mixes the joystick into differential neck-left / neck-right values, both centre-zero (**-1600..0..1600**). Both axes are sticky-filtered at the source so a parked (spring-removed) stick holds dead still without giving up 1-count precision when moved slowly
 - Transmits all control data to the robot receiver via ESP-NOW (fixed-size packed structs, no `String` members so they survive the wireless `memcpy`)
@@ -334,22 +334,27 @@ On the **right keypad**:
 
 ### Where faces are stored
 
-Faces live in **this board's own NVS flash partition**, written at runtime with the `Preferences` library. 16 slots at 24 bytes each is 384 bytes against the default table's 20KB `nvs` partition, so the whole set fits about fifty times over.
+The authoritative store is the **microSD on j4_display_right's TFT module**, in `FACES.TXT`. This board keeps a **cache in its own NVS flash partition** (16 slots at 24 bytes = 384 bytes against the default table's 20KB `nvs` partition).
 
-NVS is authoritative, and that is the point: a save is durable the instant `*` is pressed, with no round trip to any other board. There is no pending state to reason about, and recall works with every other board in the system unplugged.
+The split matters:
+
+- **The card is the source of truth.** This board asks for a dump at boot and writes through on every save, over the Serial2 link that already carries `M:`/`X:`/`I:`. A dump overwrites the local cache, the one exception being a locally-dirty slot, which is newer than the card by definition and is queued to be pushed to it.
+- **The NVS cache means nothing waits on the card.** A save is in flash before the confirmation is drawn, boot never blocks on a dump, and recall works with j4_display_right unplugged, which is most of bench testing.
 
 Writes happen only on a save, on a mirror acknowledgement, and once on migration, so flash wear is a non-issue even before NVS's own wear levelling. The stored blob carries a version byte plus `FACE_SLOTS` and `FACE_VALUES`, so changing either is detected on load and treated as "nothing stored" rather than reinterpreted as garbage.
 
 Normal firmware uploads leave NVS alone. `pio run -t erase` and changes to the partition table both wipe it.
 
-### The j4_talk SD mirror
+### Sync behaviour
 
-The older `FACES.TXT` path on j4_talk's microSD is deliberately still running, as a mirror rather than the source of truth, so local storage can be verified against it before the Teensy path is cut:
+- This board re-requests the dump every 2.5s until a complete one lands. A dump only counts as complete when the `FACE:` lines received match the count in `FACE_END:<n>`, so a partial read is simply re-requested.
+- `FACE_END:-1` means there is no card, as distinct from `FACE_END:0` for a mounted card with no faces yet. On `-1` this board stays unsynced and keeps asking, so a card inserted later loads without a reboot.
+- A save is cached in NVS first, then written through. While j4_display_right is offline the save stays flagged dirty and one dirty face is pushed per 2s tick once the link returns. The display shows "FACE `<key>` ON SD" on `FACEOK:`.
+- On `FACEERR:` nothing is lost: the face is in NVS regardless, and auto-retry stops for that slot until it is re-saved. A reboot clears the failure flag so the write is retried.
 
-- After boot (or whenever the talk link appears) this board re-requests the saved-face dump every 2.5s until a complete one lands.
-- **An incoming dump may only populate a controller whose NVS was empty at boot.** That is the one-time migration of an existing `FACES.TXT`, and it persists itself to NVS on completion ("FACES MIGRATED / SD -> CONTROLLER"). Once anything is stored locally, the SD never overwrites it.
-- A save made while j4_talk is offline is already safe in NVS; it stays flagged dirty and is pushed to the SD when the link comes up. The display shows "FACE `<key>` ON SD" when the Teensy confirms.
-- If the Teensy reports an SD write failure, nothing is lost: the face is in NVS regardless, and auto-retry stops until it is re-saved. A reboot clears the failure flag so the mirror retries.
+### The old j4_talk path
+
+The `FACES.TXT` path on j4_talk's microSD is gated off behind `FACE_STORE_TALK_SD`, which defaults to `0`. Two stores both serving dumps would fight, with whichever answered last silently winning, so while the display_right card is in use the controller neither requests from talk nor acts on face packets it sends. The ESP-NOW plumbing is left in place, so setting that define back to `1` restores the old behaviour without touching j4_receiver or j4_talk.
 
 Slots are keyed by the keypad **character**, so re-deriving a keymap keeps every saved face on the same printed key. 15 keys are usable as slots (`*` is the confirm key). Face traffic is its own ESP-NOW packet type (0x04) translated by j4_receiver to text lines on the Teensy UART; see those repos for the protocol.
 

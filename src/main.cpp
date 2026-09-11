@@ -32,7 +32,8 @@
 //          v0_6_37:  2026-08-31  -KL
 //          v0_6_38:  2026-09-02  -KL
 //          v0_6_39:  2026-09-09  -KL
-//   ver. increment:  20260909--021 (v0_6_39)
+//          v0_6_40:  2026-09-11  -KL
+//   ver. increment:  20260911--022 (v0_6_40)
 //
 //
 //           author:  Kevin Lange
@@ -490,6 +491,26 @@
 //                            version plus FACE_SLOTS/FACE_VALUES, so changing
 //                            either is detected rather than reinterpreted as
 //                            garbage.
+//                 v0_6_40 -- Face store moved to the microSD on
+//                            j4_display_right's TFT module. That card is now
+//                            the source of truth and NVS is a cache: a save
+//                            is written to NVS first, so it is durable and
+//                            recallable immediately, then written through to
+//                            the card over the Serial2 link that already
+//                            carries M:/X:/I:. New lines both ways: "FACES?"
+//                            and "FACESAVE:" out, "FACE:", "FACE_END:<n>",
+//                            "FACEOK:" and "FACEERR:" back.
+//                            A dump DOES overwrite the cache, since the card
+//                            is authoritative, except for a locally-dirty
+//                            slot which is newer by definition. FACE_END:-1
+//                            means no card, as distinct from FACE_END:0 for a
+//                            mounted but empty card, so a card inserted later
+//                            is picked up without a reboot.
+//                            The j4_talk path is gated off behind
+//                            FACE_STORE_TALK_SD (0): two stores both serving
+//                            dumps would fight, with whichever answered last
+//                            silently winning. Its ESP-NOW plumbing is left
+//                            intact so the define alone restores it.
 //
 //
 //
@@ -917,6 +938,24 @@ FaceSlot faces[FACE_SLOTS];
 #define FACE_NVS_NS   "j4faces"
 #define FACE_NVS_VER  1
 bool          faces_from_nvs = false;  // NVS held at least one face at boot
+
+// Which board holds the authoritative face store.
+//
+// The microSD on j4_display_right's TFT module is the source of truth: the
+// controller asks for a dump at boot and writes through on every save, over
+// the Serial2 link that already carries M:/X:/I:. NVS is a cache, so a recall
+// still works with that board unplugged and boot never waits on the card.
+//
+// The older j4_talk SD path is gated OFF rather than deleted. Two stores both
+// serving dumps would fight, with whichever answered last silently winning.
+// Set this back to 1 only if the display_right card is abandoned.
+#define FACE_STORE_TALK_SD  0
+
+// Serial2 face store (j4_display_right microSD)
+bool          facesSD_synced   = false;  // a complete dump has landed
+uint8_t       facesSD_count    = 0;      // FACE: lines since the last FACES?
+unsigned long facesSDReq_previousMillis = 0;
+const unsigned long facesSDReq_interval = 2500;  // re-ask until a dump lands
 
 bool          faces_synced   = false;  // true once a complete SD dump landed
 uint8_t       faceDumpCount  = 0;      // FACE_OP_DATA packets since last REQ
@@ -1460,6 +1499,32 @@ bool talkLinkUp() {
       && rcvData.talk_ok_rcv;
 }
 
+// The face store link is usable when j4_display_right's 25Hz "P:" feed is
+// fresh. Same non-blocking heartbeat the pot values already rely on.
+bool dispRLinkUp() {
+  return (millis() - lastDisplayRMs < DISPLAY_TIMEOUT_MS);
+}
+
+// Ask j4_display_right for its FACES.TXT. It answers with one FACE: line per
+// face then FACE_END:<n>, and the count is what makes a dump complete.
+void faceRequestDump() {
+  facesSD_count = 0;
+  Serial2.print("FACES?\n");
+}
+
+// Write one face through to the card. Same CSV the Teensy used, so the card is
+// interchangeable between the two stores. Fire and forget: FACEOK:/FACEERR:
+// comes back on the "P:" line parser, and the face is already safe in NVS.
+void faceSendToSD(const FaceSlot *f) {
+  if (!f) return;
+  char body[80];
+  int n = snprintf(body, sizeof(body), "FACESAVE:%c", f->key);
+  for (uint8_t i = 0; i < FACE_VALUES; i++)
+    n += snprintf(body + n, sizeof(body) - n, ",%d", f->v[i]);
+  snprintf(body + n, sizeof(body) - n, ",%u\n", f->toggles);
+  Serial2.print(body);
+}
+
 // Persist every slot as one blob. Saves are user actions, a handful a session,
 // so write frequency is a non-issue and NVS wear levelling covers it anyway.
 void facesSaveNVS() {
@@ -1555,12 +1620,73 @@ void faceSaveConfirmed() {
   f->toggles = (laser_toggle   << TOGGLE_BIT_LASER)
              | (vent_toggle    << TOGGLE_BIT_VENT)
              | (eye_pop_toggle << TOGGLE_BIT_EYE_POP);
-  // Durable before the message is even drawn. Nothing here depends on talk.
+  // Cache locally first so the face is usable and survives a reboot even if
+  // the card write fails, then write through to the authoritative store.
   facesSaveNVS();
   faces_from_nvs = true;
+  faceSendToSD(f);
   char l1[24];
   snprintf(l1, sizeof(l1), "FACE SAVED ON %c", kc);
-  faceMsg(l1, "STORED IN CONTROLLER", 2500);
+  faceMsg(l1, dispRLinkUp() ? "WRITING TO SD..." : "CACHED: NO SD LINK", 2500);
+}
+
+// One line back from j4_display_right's face store. Only the four recognised
+// forms do anything; everything else is dropped as line noise, and none of
+// them counts as a heartbeat (the "P:" feed owns that).
+//
+// The card is authoritative, so unlike the old NVS-wins rule a dump here DOES
+// overwrite the local cache. The one exception is a locally-dirty slot, which
+// is newer than the card by definition and is waiting to be pushed to it.
+void faceHandleSDLine(const String &line) {
+  char l1[24];
+
+  if (line.startsWith("FACE:")) {
+    char key = 0;
+    int  v[FACE_VALUES] = { 0 }, tg = 0;
+    int n = sscanf(line.c_str(), "FACE:%c,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d",
+                   &key, &v[0], &v[1], &v[2], &v[3], &v[4], &v[5],
+                   &v[6], &v[7], &v[8], &v[9], &v[10], &tg);
+    if (n != FACE_VALUES + 2) return;          // malformed, ignore
+    facesSD_count++;
+    FaceSlot *f = faceAlloc(key);
+    if (f && !f->dirty) {
+      f->key       = key;
+      f->valid     = true;
+      f->dirty     = false;
+      f->sd_failed = false;
+      f->toggles   = (uint8_t)tg;
+      for (uint8_t i = 0; i < FACE_VALUES; i++) f->v[i] = (int16_t)v[i];
+    }
+
+  } else if (line.startsWith("FACE_END:")) {
+    int n = 0;
+    if (sscanf(line.c_str(), "FACE_END:%d", &n) != 1) return;
+    // n < 0 means there is no card to read, as opposed to a mounted card with
+    // no faces on it yet (n == 0). Staying unsynced keeps the request timer
+    // asking, so inserting a card later loads it without a reboot.
+    if (n < 0) { facesSD_synced = false; return; }
+    // Complete only if every announced face actually landed; otherwise stay
+    // unsynced and the request timer asks again (idempotent).
+    facesSD_synced = (facesSD_count == (uint8_t)n);
+    if (facesSD_synced && n > 0) {
+      // Mirror the card into NVS so the next boot works without the display.
+      facesSaveNVS();
+      faces_from_nvs = true;
+    }
+
+  } else if (line.startsWith("FACEOK:")) {
+    char kc = line.length() > 7 ? line[7] : 0;
+    FaceSlot *f = faceFind(kc);
+    if (f) { f->dirty = false; facesSaveNVS(); }   // do not re-push after reboot
+    snprintf(l1, sizeof(l1), "FACE %c ON SD", kc);
+    faceMsg(l1, "", 1500);
+
+  } else if (line.startsWith("FACEERR:")) {
+    char kc = line.length() > 8 ? line[8] : 0;
+    FaceSlot *f = faceFind(kc);
+    if (f) f->sd_failed = true;   // stays valid in NVS, stop auto-retrying
+    faceMsg("SD WRITE FAILED", "FACE HELD IN CONTROLLER", 3000);
+  }
 }
 
 void faceRecall(char kc) {
@@ -1604,6 +1730,13 @@ void processFacePackets() {
     espnow_face_pkt_t pkt;
     memcpy(&pkt, (const void *)&faceRxQ[faceRxTail], sizeof(pkt));
     faceRxTail = (uint8_t)((faceRxTail + 1) % FACE_RXQ);
+
+#if !FACE_STORE_TALK_SD
+    // Legacy talk store is off: ignore anything it sends rather than letting
+    // a stale FACES.TXT overwrite what came off the display_right card.
+    if (pkt.op == FACE_OP_DATA || pkt.op == FACE_OP_END
+        || pkt.op == FACE_OP_ACK || pkt.op == FACE_OP_ERR) continue;
+#endif
 
     if (pkt.op == FACE_OP_DATA) {
       faceDumpCount++;
@@ -1785,10 +1918,14 @@ void loop() {
         dispR_brightness_raw = b;
         dispR_volume_raw     = v;
         lastDisplayRMs = millis();
+      } else {
+        faceHandleSDLine(xiaoRSerialBuf);
       }
       xiaoRSerialBuf = "";
     } else if (c != '\r') {
-      if (xiaoRSerialBuf.length() > 40) xiaoRSerialBuf = "";  // line noise guard
+      // Raised from 40: a FACE: dump line carries a key, 11 values and a
+      // toggle byte, so it runs to about 60 characters.
+      if (xiaoRSerialBuf.length() > 96) xiaoRSerialBuf = "";  // line noise guard
       xiaoRSerialBuf += c;
     }
   }
@@ -2175,9 +2312,32 @@ void loop() {
     Serial2.print("X:\n");
   }
 
-  // Re-request the saved-face dump until a complete one lands. Fires only
-  // while the whole talk chain is up; a robot with no talk board simply
-  // never syncs and everything else keeps working.
+  // Re-request the dump from the authoritative store (j4_display_right's
+  // microSD) until a complete one lands. Fires only while that link is up; a
+  // bench board with no display simply runs from its NVS cache.
+  if (currentMillis - facesSDReq_previousMillis >= facesSDReq_interval) {
+    facesSDReq_previousMillis = currentMillis;
+    if (!facesSD_synced && dispRLinkUp()) faceRequestDump();
+  }
+
+  // Push one dirty face per tick to the card; FACEOK: clears the flag. Saves
+  // made while the display was offline sync themselves this way, and are safe
+  // in NVS the whole time.
+  if (currentMillis - faceDirty_previousMillis >= faceDirty_interval) {
+    faceDirty_previousMillis = currentMillis;
+    if (dispRLinkUp()) {
+      for (uint8_t i = 0; i < FACE_SLOTS; i++) {
+        if (faces[i].valid && faces[i].dirty && !faces[i].sd_failed) {
+          faceSendToSD(&faces[i]);
+          break;
+        }
+      }
+    }
+  }
+
+#if FACE_STORE_TALK_SD
+  // Legacy j4_talk SD path. Off by default: two stores both serving dumps
+  // would fight, with whichever answered last silently winning.
   if (currentMillis - faceReq_previousMillis >= faceReq_interval) {
     faceReq_previousMillis = currentMillis;
     if (!faces_synced && talkLinkUp()) {
@@ -2185,20 +2345,7 @@ void loop() {
       faceSendPkt(FACE_OP_REQ, NULL);
     }
   }
-
-  // Push one dirty face per tick toward the SD; FACE_OP_ACK clears the flag.
-  // Saves made while talk was offline sync themselves this way.
-  if (currentMillis - faceDirty_previousMillis >= faceDirty_interval) {
-    faceDirty_previousMillis = currentMillis;
-    if (talkLinkUp()) {
-      for (uint8_t i = 0; i < FACE_SLOTS; i++) {
-        if (faces[i].valid && faces[i].dirty && !faces[i].sd_failed) {
-          faceSendPkt(FACE_OP_SAVE, &faces[i]);
-          break;
-        }
-      }
-    }
-  }
+#endif
   // --- END FACE PRESET BACKGROUND WORK ---
 
 }
