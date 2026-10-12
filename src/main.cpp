@@ -34,7 +34,8 @@
 //          v0_6_39:  2026-09-09  -KL
 //          v0_6_40:  2026-09-11  -KL
 //          v0_6_41:  2026-10-12  -KL
-//   ver. increment:  20261012--023 (v0_6_41)
+//          v0_6_42:  2026-10-12  -KL
+//   ver. increment:  20261012--024 (v0_6_42)
 //
 //
 //           author:  Kevin Lange
@@ -546,6 +547,32 @@
 //                            8 face pots, post-overlay, -1 = module absent)
 //                            so j4_display_right can show all of it.
 //                            Needs the matching j4_display_right build.
+//                 v0_6_42 -- Active face. A recall (or a save) makes that
+//                            key the active face, and j4_display_right's
+//                            header shows "Face: A" in place of KEVCO.
+//                            Moving a pot (or flipping a toggle) away from
+//                            the saved value makes it "Face: A*", and each
+//                            changed value gets its own "*". V: now ends in
+//                            ",<key>,<changed mask>" to carry that.
+//                            Saving onto a key that already holds a face
+//                            asks first: "OVERRIDE FACE A?" / "PRESS * TO
+//                            CONFIRM", and waits (no timeout) for *; any
+//                            other key cancels. An empty key still saves
+//                            straight away. A save now holds the saved
+//                            values exactly like a recall, so pot jitter
+//                            cannot mark a fresh save as changed.
+//                            Faster recall: the right pad is scanned every
+//                            20ms (was 50) and a release counts after 60ms
+//                            with no key (was 200), with a 250ms rejoin so a
+//                            brief contact dropout during a 3s hold does not
+//                            restart it (and a recall that dropout fired is
+//                            undone, so it cannot wipe unsaved changes
+//                            mid-override). The recall goes out on the very
+//                            next loop pass instead of waiting for the 40ms
+//                            control tick, and no longer shows a message
+//                            (the header says "Face: A"). Save messages stay
+//                            up at least 3s.
+//                            Needs the matching j4_display_right build.
 //
 //
 //
@@ -1029,15 +1056,54 @@ uint8_t toggles_phys_last  = 0;
 // scan that misses a held key (a membrane contact flickering under a thumb, or
 // a NACKed I2C read) used to count as a release: before 3s that restarted the
 // hold timer, so a save could not be reached, and it fired a recall as well.
+//
+// A tap recalls on release, so release detection is the recall latency: 60ms
+// with no key seen, scanned every 20ms. A key that comes back within
+// RK_REJOIN_MS of a release (a contact dropout mid-hold) continues the same
+// press, so the 3s hold timer is not restarted by a flicker.
 #define FACE_HOLD_MS   3000   // hold this long to save the face to that key
-#define RK_SCAN_MS       50   // right pad scan period
-#define RK_RELEASE_MS   200   // no key seen this long = released
+#define RK_SCAN_MS       20   // right pad scan period
+#define RK_RELEASE_MS    60   // no key seen this long = released
+#define RK_REJOIN_MS    250   // same key back this soon = same press
 int8_t        rk_down       = -1;     // scan code currently held, -1 = none
 unsigned long rk_down_since = 0;
 unsigned long rk_last_seen  = 0;      // last scan that actually saw rk_down
-bool          rk_hold_fired = false;  // this press already saved
+bool          rk_hold_fired = false;  // this press already acted (save/prompt/confirm)
+int8_t        rk_rel_key    = -1;     // last released press, for the rejoin
+unsigned long rk_rel_at     = 0;
+unsigned long rk_rel_since  = 0;
+bool          rk_rel_fired  = false;
 unsigned long rk_scan_previousMillis = 0;
 unsigned long faceMsg_clearAt     = 0;   // 0 = message is not timed
+
+// Active face: the key last recalled or saved, 0 = none since boot. The
+// display header shows "Face: <key>", plus "*" while anything differs from
+// what is saved on that key. face_changed bits 0-10 are the FI_* channels,
+// bit 11 the toggles.
+#define FACE_CHANGED_TOGGLES  (1 << FACE_VALUES)
+#define FACE_CHANGED_TOL      2     // 0-255 counts; pots jitter about 1
+char     face_active  = 0;
+uint16_t face_changed = 0;
+
+// What a tap recall replaced, so it can be put back if the "tap" turns out to
+// be a contact dropout in the middle of a hold (the key comes back within
+// RK_REJOIN_MS). Without this a flicker while holding A to override it would
+// recall A's saved values over the unsaved changes the user meant to save.
+struct FaceUndo {
+  bool    ok;
+  int16_t v[FACE_VALUES];
+  bool    on[FACE_VALUES];
+  uint8_t toggles, toggle_mask;
+  char    active;
+};
+FaceUndo face_undo = { false };
+
+// Overwrite prompt: holding a key that already has a face asks first, and
+// waits for * (any other key cancels). No timeout, so the prompt is re-sent
+// before the display's 15s stale-message clear can drop it.
+#define FACE_CONFIRM_RESEND_MS  5000
+char          face_confirm_key  = 0;   // 0 = no prompt open
+unsigned long face_confirm_sent = 0;
 
 // Incoming face packets: OnDataRecv (WiFi task) only memcpys into this ring;
 // loop() drains it. Single producer / single consumer, volatile indexes.
@@ -1660,6 +1726,9 @@ void faceMsg(const char *l1, const char *l2, unsigned long showMs) {
   faceMsg_clearAt = showMs ? millis() + showMs : 0;
 }
 
+void faceApply(const FaceSlot *f);
+void faceConfirmShow();
+
 // Snapshot the CURRENT face into key kc: the effective values (post
 // arbitration and preset overlay), i.e. exactly what the robot's face looks
 // like right now. Called when a key on keypad_right has been held for 3s.
@@ -1693,9 +1762,45 @@ void faceSave(char kc) {
   faceSendToSD(f);
   faceSaved_key = kc;
   faceSaved_at  = millis();
+  // Hold what was just saved, exactly as a recall would. The robot does not
+  // move (these ARE its current values), but pot jitter can no longer nudge
+  // a channel off the saved value and mark a fresh save as changed; a pot
+  // has to be really moved (DUAL_CLAIM_COUNTS) to take its channel back.
+  faceApply(f);
+  face_active  = kc;
+  face_changed = 0;
   // The face is already safe in NVS. The second line is only about the card,
-  // and FACEOK:/FACEERR: replaces it with the outcome.
+  // and FACEOK:/FACEERR: replaces it with the outcome (and restarts the 3s).
   faceMsg(l1, dispRLinkUp() ? "WRITING SD CARD..." : "IN CONTROLLER, SD LATER", 3000);
+}
+
+// A key on keypad_right was held for 3s. An empty key saves at once; a key
+// that already holds a face asks first and waits for *.
+void faceHoldAction(char kc) {
+  FaceSlot *f = faceFind(kc);
+  if (!f || !f->valid) { faceSave(kc); return; }
+  face_confirm_key  = kc;
+  face_confirm_sent = millis();
+  faceConfirmShow();
+}
+
+void faceConfirmShow() {
+  char l1[24];
+  snprintf(l1, sizeof(l1), "OVERRIDE FACE %c?", face_confirm_key);
+  faceMsg(l1, "PRESS * TO CONFIRM, OTHER KEY CANCELS", 0);
+}
+
+// First new press after the prompt opened: * confirms, anything else cancels.
+void faceConfirmPress(char kc) {
+  char k = face_confirm_key;
+  face_confirm_key = 0;
+  if (kc == '*') {
+    faceSave(k);
+  } else {
+    char l1[24];
+    snprintf(l1, sizeof(l1), "FACE %c NOT CHANGED", k);
+    faceMsg(l1, "OVERRIDE CANCELLED", 2500);
+  }
 }
 
 // One line back from j4_display_right's face store. Only the four recognised
@@ -1758,7 +1863,8 @@ void faceHandleSDLine(const String &line) {
     if (f) { f->dirty = false; facesSaveNVS(); }   // do not re-push after reboot
     // Only report the card result for the save the user just made; the
     // background sync of older faces stays silent.
-    if (kc && kc == faceSaved_key && millis() - faceSaved_at < FACE_ACK_REPORT_MS) {
+    if (kc && kc == faceSaved_key && millis() - faceSaved_at < FACE_ACK_REPORT_MS
+        && !face_confirm_key) {
       snprintf(l1, sizeof(l1), "FACE SAVED TO %c", kc);
       faceMsg(l1, "SD CARD OK", 3000);
       faceSaved_key = 0;
@@ -1772,7 +1878,8 @@ void faceHandleSDLine(const String &line) {
     // slower no-card cadence takes over; a card that comes back answers with
     // a complete dump, which clears sd_failed and re-queues this face.
     facesSD_synced = false;
-    if (kc && kc == faceSaved_key && millis() - faceSaved_at < FACE_ACK_REPORT_MS) {
+    if (kc && kc == faceSaved_key && millis() - faceSaved_at < FACE_ACK_REPORT_MS
+        && !face_confirm_key) {
       snprintf(l1, sizeof(l1), "FACE SAVED TO %c", kc);
       faceMsg(l1, "SD WRITE FAILED, KEPT IN CONTROLLER", 4000);
       faceSaved_key = 0;
@@ -1788,6 +1895,38 @@ void faceRecall(char kc) {
     faceMsg(l1, "HOLD 3 SEC TO SAVE ONE", 2500);
     return;
   }
+  face_undo.ok = true;
+  memcpy(face_undo.v,  preset_v,  sizeof(preset_v));
+  memcpy(face_undo.on, preset_on, sizeof(preset_on));
+  face_undo.toggles     = preset_toggles;
+  face_undo.toggle_mask = preset_toggle_mask;
+  face_undo.active      = face_active;
+  faceApply(f);
+  face_active  = kc;
+  face_changed = 0;
+  // No message: the header turns into "Face: <key>" on the next V: line,
+  // which goes out on the very next loop pass (below). Clear anything still
+  // up (a "NO FACE ON" from a moment ago) so the header shows it at once.
+  Serial2.print("X:\n");
+  faceMsg_clearAt = 0;
+  control_tx_previousMillis = millis() - control_tx_interval;   // send now
+}
+
+// Put back whatever the last tap recall replaced (see FaceUndo).
+void faceRecallUndo() {
+  if (!face_undo.ok) return;
+  face_undo.ok = false;
+  memcpy(preset_v,  face_undo.v,  sizeof(preset_v));
+  memcpy(preset_on, face_undo.on, sizeof(preset_on));
+  preset_toggles     = face_undo.toggles;
+  preset_toggle_mask = face_undo.toggle_mask;
+  face_active        = face_undo.active;
+  control_tx_previousMillis = millis() - control_tx_interval;   // send now
+}
+
+// Hold a face through the preset overlay: each channel until its own pot
+// moves, each toggle until its switch is flipped.
+void faceApply(const FaceSlot *f) {
   for (uint8_t i = 0; i < FACE_VALUES; i++) {
     preset_v[i]  = f->v[i];
     preset_on[i] = true;
@@ -1797,8 +1936,6 @@ void faceRecall(char kc) {
                      | (1 << TOGGLE_BIT_EYE_POP);
   // phys_baseline stops updating while preset_on, so takeover measures total
   // travel since this exact moment.
-  snprintf(l1, sizeof(l1), "FACE %c RECALLED", kc);
-  faceMsg(l1, "MOVE A POT TO RETAKE IT", 2500);
 }
 
 void faceSendPkt(uint8_t op, const FaceSlot *f) {
@@ -2271,12 +2408,31 @@ void loop() {
       eyebrow_l_value, eyebrow_r_value, basket_brow_l_value, basket_brow_r_value,
       nose_value, nose_basket_value, eyelid_l_value, eyelid_r_value
     };
-    char vline[64];
+    // What differs from the active face's saved copy. A channel the overlay is
+    // still holding IS the saved value; one a pot has taken back is compared
+    // with a small tolerance so jitter does not flicker the "*".
+    face_changed = 0;
+    const FaceSlot *af = face_active ? faceFind(face_active) : NULL;
+    if (af && af->valid) {
+      for (uint8_t i = 0; i < FACE_VALUES; i++)
+        if (!preset_on[i] && src_ok[i] && abs(fv[i] - af->v[i]) > FACE_CHANGED_TOL)
+          face_changed |= (1 << i);
+      uint8_t tg = (laser_toggle   << TOGGLE_BIT_LASER)
+                 | (vent_toggle    << TOGGLE_BIT_VENT)
+                 | (eye_pop_toggle << TOGGLE_BIT_EYE_POP);
+      if (tg != af->toggles) face_changed |= FACE_CHANGED_TOGGLES;
+    } else {
+      face_active = 0;   // its slot is gone (cannot normally happen)
+    }
+
+    char vline[96];
     int  n = snprintf(vline, sizeof(vline), "V:");
     for (uint8_t i = 0; i < FACE_VALUES; i++)
       n += snprintf(vline + n, sizeof(vline) - n, i ? ",%d" : "%d",
                     (src_ok[i] || preset_on[i]) ? constrain(fv[i], 0, 255) : -1);
-    snprintf(vline + n, sizeof(vline) - n, "\n");
+    // ",<active key or ->,<changed mask>"
+    snprintf(vline + n, sizeof(vline) - n, ",%c,%u\n",
+             face_active ? face_active : '-', face_changed);
     Serial2.print(vline);
   }
 
@@ -2390,8 +2546,9 @@ void loop() {
 
   // RIGHT keypad -- FACE PRESETS. Tap = recall that key's face. Hold for 3s =
   // save the current face to that key, straight away, and j4_display_right
-  // shows "FACE SAVED TO <key>". Every key is a slot. Scanned on its own
-  // faster timer so a tap feels immediate even with the release debounce.
+  // shows "FACE SAVED TO <key>"; a key that already has a face asks for *
+  // first. Every key is a slot. Scanned on its own fast timer so a tap
+  // recalls almost at once.
   // Pure state tracking, nothing here blocks.
   if (currentMillis - rk_scan_previousMillis >= RK_SCAN_MS) {
     rk_scan_previousMillis = currentMillis;
@@ -2410,18 +2567,43 @@ void loop() {
         char kc = kpg_right.keymap[rk_raw];
         rk_last_seen = currentMillis;
         if ((int8_t)rk_raw != rk_down) {       // new key down
-          rk_down       = (int8_t)rk_raw;
-          rk_down_since = currentMillis;
-          rk_hold_fired = false;
           last_key_char_right = kc;
+          if (rk_down < 0 && (int8_t)rk_raw == rk_rel_key
+              && currentMillis - rk_rel_at < RK_REJOIN_MS) {
+            // The same key back within a moment of its release: a contact
+            // dropout, not a new press. Carry on with the original press,
+            // including whether it already acted, so a flicker under a thumb
+            // still holding the key cannot answer the prompt that key opened.
+            rk_down       = (int8_t)rk_raw;
+            rk_down_since = rk_rel_since;
+            rk_hold_fired = rk_rel_fired;
+            // If the dropout fired a tap recall, take it back.
+            if (!rk_rel_fired) faceRecallUndo();
+          } else {
+            face_undo.ok  = false;             // a real new press: recall stands
+            rk_down       = (int8_t)rk_raw;
+            rk_down_since = currentMillis;
+            rk_hold_fired = false;
+            if (face_confirm_key) {
+              // An overwrite prompt is open: this press answers it and does
+              // nothing else (no recall on release, no hold).
+              rk_hold_fired = true;
+              faceConfirmPress(kc);
+            }
+          }
+          rk_rel_key = -1;
         } else if (!rk_hold_fired && currentMillis - rk_down_since >= FACE_HOLD_MS) {
           rk_hold_fired = true;                // once per press
-          faceSave(kc);
+          faceHoldAction(kc);
         }
       } else if (rk_down >= 0 && currentMillis - rk_last_seen >= RK_RELEASE_MS) {
-        // Released: no key seen for RK_RELEASE_MS. A press that already saved
+        // Released: no key seen for RK_RELEASE_MS. A press that already acted
         // does nothing more; a shorter one is a tap and recalls.
         if (!rk_hold_fired) faceRecall(kpg_right.keymap[rk_down]);
+        rk_rel_key   = rk_down;                // allow a rejoin (see RK_REJOIN_MS)
+        rk_rel_at    = currentMillis;
+        rk_rel_since = rk_down_since;
+        rk_rel_fired = rk_hold_fired;
         rk_down = -1;
       }
     }
@@ -2433,6 +2615,12 @@ void loop() {
   if (faceMsg_clearAt && currentMillis >= faceMsg_clearAt) {
     faceMsg_clearAt = 0;
     Serial2.print("X:\n");
+  }
+  // Keep an open overwrite prompt on screen: it has no timeout, but the
+  // display drops any message it has not heard again within 15s.
+  if (face_confirm_key && currentMillis - face_confirm_sent >= FACE_CONFIRM_RESEND_MS) {
+    face_confirm_sent = currentMillis;
+    faceConfirmShow();
   }
 
   // Re-request the dump from the authoritative store (j4_display_right's

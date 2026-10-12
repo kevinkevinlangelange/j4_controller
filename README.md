@@ -333,10 +333,19 @@ A **face** is a snapshot of the robot's facial expression: iris, eye color, eye 
 
 On the **right keypad**:
 
-- **Tap a key**: recall that key's saved face. Every face channel jumps to the saved value and holds there; turning any face pot takes just that channel back (frozen-baseline takeover, so even a slow turn works), and flipping a toggle takes that toggle back. The rest of the face stays put.
-- **Hold a key for 3 seconds** (any key, `*` and `#` included): the current face is saved to that key at once, and j4_display_right's header strip shows "FACE SAVED TO `<key>`" with the SD card result underneath ("SD CARD OK", or "SD WRITE FAILED, KEPT IN CONTROLLER"). Keep holding as long as you like; it saves once per press.
+- **Tap a key**: recall that key's saved face. It fires about 40-60ms after the key is let go. Every face channel jumps to the saved value and holds there; turning any face pot takes just that channel back (frozen-baseline takeover, so even a slow turn works), and flipping a toggle takes that toggle back. The rest of the face stays put. A key with nothing saved shows "NO FACE ON `<key>`".
+- **Hold an empty key for 3 seconds** (any key, `*` and `#` included): the current face is saved to that key at once, and j4_display_right's header strip shows "FACE SAVED TO `<key>`" for at least 3 seconds, with the SD card result underneath ("SD CARD OK", or "SD WRITE FAILED, KEPT IN CONTROLLER").
+- **Hold a key that already has a face for 3 seconds**: the header asks "OVERRIDE FACE `<key>`?" / "PRESS * TO CONFIRM, OTHER KEY CANCELS" and waits, with no timeout. Press `*` to overwrite the face with the current one; press any other key to cancel ("FACE `<key>` NOT CHANGED"). The key that answers the prompt does nothing else.
 
-The right pad is scanned every 50ms, and a key only counts as released after 200ms with nothing seen. Before v0_6_41 a single scan that missed the held key (a membrane contact flicker, or one NACKed I2C read, which also took the pad offline for a full second) counted as a release: the 3s hold restarted, a recall fired, and once the old confirm prompt was up the same key read as a "new" press that cancelled it. Both keypads and all four ADS1115s now also ride out up to two missed I2C probes (`I2C_MISS_LIMIT`) before being declared absent, holding their last values meanwhile.
+### Active face
+
+The key last recalled or saved is the **active face**. While no message is up, j4_display_right's header shows it in place of KEVCO, as **Face: A**. As soon as anything differs from what is saved on that key it becomes **Face: A\***, and each value that differs gets its own `*`: the face pot numbers in the upper area, and the IRIS / COLOR / BRIGHTNESS labels at the bottom. A flipped LASER / VENT / EYE POP toggle marks the header only, since the toggles have no spot on that screen. Turning a pot back to within 2 counts of its saved value clears its `*`. Saving makes the saved values the held ones, exactly as a recall would, so pot jitter cannot mark a fresh save as changed; a pot has to really move (`DUAL_CLAIM_COUNTS`) to take its channel back.
+
+The active key and a changed-value mask ride on the end of the `V:` line (see j4_display_right). The active face is not remembered across a power cycle; the header says KEVCO until the first recall or save.
+
+### Keypad timing
+
+The right pad is scanned every 20ms (`RK_SCAN_MS`), and a key counts as released after 60ms with nothing seen (`RK_RELEASE_MS`). A tap recalls on release, and the recall goes out on the very next loop pass rather than waiting for the 40ms control tick. If the same key reappears within 250ms of a release (`RK_REJOIN_MS`), it is treated as a contact dropout, not a new press: the 3s hold carries on from where it was, and a recall that dropout fired is undone, so a flicker while holding a key to override it cannot wipe the unsaved changes you are about to save. Both keypads and all four ADS1115s also ride out up to two missed I2C probes (`I2C_MISS_LIMIT`) before being declared absent, holding their last values meanwhile.
 
 ### Where faces are stored
 
