@@ -336,7 +336,8 @@ On the **right keypad**:
 - **Tap a key**: recall that key's saved face. It fires about 40-60ms after the key is let go. Every face channel jumps to the saved value and holds there; turning any face pot takes just that channel back (frozen-baseline takeover, so even a slow turn works), and flipping a toggle takes that toggle back. The rest of the face stays put. A key with nothing saved shows "NO FACE ON `<key>`".
 - **Hold an empty key for 3 seconds** (any key, `*` and `#` included): the current face is saved to that key at once. j4_display_right's header strip shows "FACE SAVED TO `<key>`" / "WRITING SD CARD..." until the card answers, then says plainly where the face ended up, for at least 3 seconds:
   - **FACE `<key>` SAVED TO SD CARD** / SD CARD OK
-  - **FACE `<key>` NOT ON SD CARD** / SD WRITE FAILED, KEPT IN CONTROLLER (no card, or the write failed)
+  - **FACE `<key>` NOT ON SD CARD** / SD CARD NOT FOUND, CHECK WIRING (the card never answered; see j4_display_right's README: the display's own MISO/SDO must not be connected)
+  - **FACE `<key>` NOT ON SD CARD** / SD WRITE FAILED, KEPT IN CONTROLLER (the card answered but the file could not be written)
   - **FACE `<key>` NOT ON SD CARD** / NO SD ANSWER, KEPT IN CONTROLLER (nothing back within 3s)
   - **FACE SAVED TO `<key>`** / SD CARD OFFLINE, IN CONTROLLER ONLY (j4_display_right not connected)
 

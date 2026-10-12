@@ -36,7 +36,8 @@
 //          v0_6_41:  2026-10-12  -KL
 //          v0_6_42:  2026-10-12  -KL
 //          v0_6_43:  2026-10-12  -KL
-//   ver. increment:  20261012--025 (v0_6_43)
+//          v0_6_44:  2026-10-12  -KL
+//   ver. increment:  20261012--026 (v0_6_44)
 //
 //
 //           author:  Kevin Lange
@@ -585,6 +586,11 @@
 //                            "NO ANSWER FROM SD CARD" if the card says
 //                            nothing within 3s. The face is in the
 //                            controller's NVS either way.
+//                 v0_6_44 -- j4_display_right's FACEERR now says why
+//                            (",N" no card answered, ",O"/",W" the file
+//                            open/write failed), so a failed save reads
+//                            "SD CARD NOT FOUND, CHECK WIRING" or "SD WRITE
+//                            FAILED" instead of one message for both.
 //
 //
 //
@@ -1900,7 +1906,11 @@ void faceHandleSDLine(const String &line) {
     if (kc && kc == faceSaved_key && millis() - faceSaved_at < FACE_ACK_REPORT_MS
         && !face_confirm_key) {
       snprintf(l1, sizeof(l1), "FACE %c NOT ON SD CARD", kc);
-      faceMsg(l1, "SD WRITE FAILED, KEPT IN CONTROLLER", 4000);
+      // ",N" = the card never answered (wiring), ",O"/",W" = it answered but
+      // the file could not be written. Older displays send no reason.
+      char why = line.length() > 10 && line[9] == ',' ? line[10] : 0;
+      faceMsg(l1, why == 'N' ? "SD CARD NOT FOUND, CHECK WIRING"
+                             : "SD WRITE FAILED, KEPT IN CONTROLLER", 5000);
       faceSaved_key = 0;
     }
   }
