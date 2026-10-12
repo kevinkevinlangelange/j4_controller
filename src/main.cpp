@@ -35,7 +35,8 @@
 //          v0_6_40:  2026-09-11  -KL
 //          v0_6_41:  2026-10-12  -KL
 //          v0_6_42:  2026-10-12  -KL
-//   ver. increment:  20261012--024 (v0_6_42)
+//          v0_6_43:  2026-10-12  -KL
+//   ver. increment:  20261012--025 (v0_6_43)
 //
 //
 //           author:  Kevin Lange
@@ -573,6 +574,17 @@
 //                            (the header says "Face: A"). Save messages stay
 //                            up at least 3s.
 //                            Needs the matching j4_display_right build.
+//                 v0_6_43 -- The override prompt vanished at once on the bench.
+//                            The cause was in j4_display_right (an unsigned
+//                            time wrap cleared every message on arrival,
+//                            fixed there); the same wrap here made the
+//                            prompt re-send fire on the pass that opened it.
+//                            Save messages now say plainly whether the face
+//                            reached the SD card: "FACE A SAVED TO SD CARD",
+//                            or "FACE A NOT ON SD CARD" with the reason, and
+//                            "NO ANSWER FROM SD CARD" if the card says
+//                            nothing within 3s. The face is in the
+//                            controller's NVS either way.
 //
 //
 //
@@ -1031,6 +1043,7 @@ const unsigned long facesSDReq_noCardInterval = 10000;
 char          faceSaved_key = 0;
 unsigned long faceSaved_at  = 0;
 #define FACE_ACK_REPORT_MS  10000
+#define FACE_SD_ANSWER_MS    3000   // no FACEOK:/FACEERR: by now = say so
 
 bool          faces_synced   = false;  // true once a complete SD dump landed
 uint8_t       faceDumpCount  = 0;      // FACE_OP_DATA packets since last REQ
@@ -1770,8 +1783,14 @@ void faceSave(char kc) {
   face_active  = kc;
   face_changed = 0;
   // The face is already safe in NVS. The second line is only about the card,
-  // and FACEOK:/FACEERR: replaces it with the outcome (and restarts the 3s).
-  faceMsg(l1, dispRLinkUp() ? "WRITING SD CARD..." : "IN CONTROLLER, SD LATER", 3000);
+  // and FACEOK:/FACEERR: (or the FACE_SD_ANSWER_MS timeout) replaces the
+  // whole message with the outcome. Up until then, so it cannot clear first.
+  if (dispRLinkUp()) {
+    faceMsg(l1, "WRITING SD CARD...", 0);
+  } else {
+    faceMsg(l1, "SD CARD OFFLINE, IN CONTROLLER ONLY", 4000);
+    faceSaved_key = 0;   // nothing will answer; queued for the card instead
+  }
 }
 
 // A key on keypad_right was held for 3s. An empty key saves at once; a key
@@ -1811,7 +1830,7 @@ void faceConfirmPress(char kc) {
 // overwrite the local cache. The one exception is a locally-dirty slot, which
 // is newer than the card by definition and is waiting to be pushed to it.
 void faceHandleSDLine(const String &line) {
-  char l1[24];
+  char l1[28];
 
   if (line.startsWith("FACE:")) {
     char key = 0;
@@ -1865,7 +1884,7 @@ void faceHandleSDLine(const String &line) {
     // background sync of older faces stays silent.
     if (kc && kc == faceSaved_key && millis() - faceSaved_at < FACE_ACK_REPORT_MS
         && !face_confirm_key) {
-      snprintf(l1, sizeof(l1), "FACE SAVED TO %c", kc);
+      snprintf(l1, sizeof(l1), "FACE %c SAVED TO SD CARD", kc);
       faceMsg(l1, "SD CARD OK", 3000);
       faceSaved_key = 0;
     }
@@ -1880,7 +1899,7 @@ void faceHandleSDLine(const String &line) {
     facesSD_synced = false;
     if (kc && kc == faceSaved_key && millis() - faceSaved_at < FACE_ACK_REPORT_MS
         && !face_confirm_key) {
-      snprintf(l1, sizeof(l1), "FACE SAVED TO %c", kc);
+      snprintf(l1, sizeof(l1), "FACE %c NOT ON SD CARD", kc);
       faceMsg(l1, "SD WRITE FAILED, KEPT IN CONTROLLER", 4000);
       faceSaved_key = 0;
     }
@@ -2616,10 +2635,22 @@ void loop() {
     faceMsg_clearAt = 0;
     Serial2.print("X:\n");
   }
+  // A save that the card never answered: say so rather than leave
+  // "WRITING SD CARD..." up. (FACEOK:/FACEERR: clear faceSaved_key.)
+  if (faceSaved_key && !face_confirm_key
+      && millis() - faceSaved_at >= FACE_SD_ANSWER_MS) {
+    char l1[28];
+    snprintf(l1, sizeof(l1), "FACE %c NOT ON SD CARD", faceSaved_key);
+    faceMsg(l1, "NO SD ANSWER, KEPT IN CONTROLLER", 4000);
+    faceSaved_key = 0;
+  }
+
   // Keep an open overwrite prompt on screen: it has no timeout, but the
   // display drops any message it has not heard again within 15s.
-  if (face_confirm_key && currentMillis - face_confirm_sent >= FACE_CONFIRM_RESEND_MS) {
-    face_confirm_sent = currentMillis;
+  // millis(), not currentMillis: the prompt can open later in this same pass,
+  // and an unsigned currentMillis - face_confirm_sent would then wrap.
+  if (face_confirm_key && millis() - face_confirm_sent >= FACE_CONFIRM_RESEND_MS) {
+    face_confirm_sent = millis();
     faceConfirmShow();
   }
 

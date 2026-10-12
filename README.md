@@ -334,7 +334,13 @@ A **face** is a snapshot of the robot's facial expression: iris, eye color, eye 
 On the **right keypad**:
 
 - **Tap a key**: recall that key's saved face. It fires about 40-60ms after the key is let go. Every face channel jumps to the saved value and holds there; turning any face pot takes just that channel back (frozen-baseline takeover, so even a slow turn works), and flipping a toggle takes that toggle back. The rest of the face stays put. A key with nothing saved shows "NO FACE ON `<key>`".
-- **Hold an empty key for 3 seconds** (any key, `*` and `#` included): the current face is saved to that key at once, and j4_display_right's header strip shows "FACE SAVED TO `<key>`" for at least 3 seconds, with the SD card result underneath ("SD CARD OK", or "SD WRITE FAILED, KEPT IN CONTROLLER").
+- **Hold an empty key for 3 seconds** (any key, `*` and `#` included): the current face is saved to that key at once. j4_display_right's header strip shows "FACE SAVED TO `<key>`" / "WRITING SD CARD..." until the card answers, then says plainly where the face ended up, for at least 3 seconds:
+  - **FACE `<key>` SAVED TO SD CARD** / SD CARD OK
+  - **FACE `<key>` NOT ON SD CARD** / SD WRITE FAILED, KEPT IN CONTROLLER (no card, or the write failed)
+  - **FACE `<key>` NOT ON SD CARD** / NO SD ANSWER, KEPT IN CONTROLLER (nothing back within 3s)
+  - **FACE SAVED TO `<key>`** / SD CARD OFFLINE, IN CONTROLLER ONLY (j4_display_right not connected)
+
+  The face is always in the controller's NVS, and one that missed the card is written to it automatically once the card answers again.
 - **Hold a key that already has a face for 3 seconds**: the header asks "OVERRIDE FACE `<key>`?" / "PRESS * TO CONFIRM, OTHER KEY CANCELS" and waits, with no timeout. Press `*` to overwrite the face with the current one; press any other key to cancel ("FACE `<key>` NOT CHANGED"). The key that answers the prompt does nothing else.
 
 ### Active face
