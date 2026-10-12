@@ -33,7 +33,8 @@
 //          v0_6_38:  2026-09-02  -KL
 //          v0_6_39:  2026-09-09  -KL
 //          v0_6_40:  2026-09-11  -KL
-//   ver. increment:  20260911--022 (v0_6_40)
+//          v0_6_41:  2026-10-12  -KL
+//   ver. increment:  20261012--023 (v0_6_41)
 //
 //
 //           author:  Kevin Lange
@@ -511,6 +512,40 @@
 //                            dumps would fight, with whichever answered last
 //                            silently winning. Its ESP-NOW plumbing is left
 //                            intact so the define alone restores it.
+//                 v0_6_41 -- Face save fixed and simplified. Holding a key
+//                            on keypad_right for 3s now SAVES straight to
+//                            that key and j4_display_right says so ("FACE
+//                            SAVED TO A"); the "PRESS * TO CONFIRM" step is
+//                            gone, and every key including * and # is a
+//                            slot (16 keys, 16 slots). Most likely reason it
+//                            failed before: a single scan that missed the
+//                            held key (a
+//                            membrane contact flicker, or one NACKed I2C
+//                            probe, which also took the pad offline for a
+//                            whole second) counted as a release. Before 3s
+//                            that restarted the hold and fired a recall;
+//                            after the prompt opened, the "new" press of the
+//                            same key cancelled it, which is the brief flash
+//                            of a save message with nothing saved. The right
+//                            pad is now scanned every 50ms and a release
+//                            only counts after 200ms with no key seen, and
+//                            both keypads and all four ADS1115s ride out up
+//                            to two missed I2C probes before being declared
+//                            absent (holding their last values meanwhile).
+//                            Serial2 RX buffer 256 -> 2048: a full FACES.TXT
+//                            dump is ~900 bytes in one burst, which can
+//                            overrun the default buffer during a 40ms control
+//                            pass, so a long dump never completed and was
+//                            re-asked forever. After a complete dump, any face held
+//                            here but missing from the card (a fresh card)
+//                            is queued and written to it. No card answers
+//                            back off to one request per 10s, since every
+//                            request makes j4_display_right probe the slot.
+//                            "I:<iris>" becomes "V:<11 values>": the full
+//                            effective face (iris, color, brightness and the
+//                            8 face pots, post-overlay, -1 = module absent)
+//                            so j4_display_right can show all of it.
+//                            Needs the matching j4_display_right build.
 //
 //
 //
@@ -646,7 +681,7 @@ void sendFileListToXIAO();
 // --- XIAO LINKS ---
 #define XIAO_TX_PIN  17    // Serial1: GPIO17 output → left XIAO D7 (GPIO44)
 #define XIAO_RX_PIN  27    // Serial1: GPIO27 input  ← left XIAO D6 (GPIO43)
-#define XIAOR_TX_PIN 25    // Serial2: GPIO25 output → right XIAO D7 (reserved)
+#define XIAOR_TX_PIN 25    // Serial2: GPIO25 output → right XIAO D7 (V:/M:/X:/faces)
 #define XIAOR_RX_PIN 26    // Serial2: GPIO26 input  ← right XIAO D6 (pot feed)
 #define XIAO_BAUD    115200
 #define JOYSTICK_DEAD_ZONE 200  // counts either side of 1600 to snap to center (scaled for 0-3200 range)
@@ -912,7 +947,7 @@ uint16_t bat1_mv = 0;
 // A face is the 11 pot channels below plus the LASER/VENT/EYE POP toggle
 // states. No volume, no neck, no eyes X/Y. Slots are keyed by the keypad
 // CHARACTER (not the scan code) so a re-derived keymap keeps every saved
-// face on the same printed key. '*' is the confirm key and cannot be a slot.
+// face on the same printed key. All 16 keys are slots, '*' and '#' included.
 enum {
   FI_IRIS = 0, FI_COLOR, FI_BRIGHT,
   FI_BROW_L, FI_BROW_R, FI_BBROW_L, FI_BBROW_R,
@@ -923,8 +958,9 @@ enum {
 struct FaceSlot {
   char    key;         // keypad character, 0 = slot never used
   bool    valid;       // has data (recallable)
-  bool    dirty;       // not yet confirmed on the Teensy SD
-  bool    sd_failed;   // Teensy reported a write error -- stop auto-retrying
+  bool    dirty;       // not yet confirmed on the j4_display_right microSD
+  bool    sd_failed;   // card reported a write error: stop auto-retrying
+                       // until the next complete dump shows the card is back
   int16_t v[FACE_VALUES];
   uint8_t toggles;     // bit 0 LASER, 1 VENT, 2 EYE POP
 };
@@ -954,8 +990,20 @@ bool          faces_from_nvs = false;  // NVS held at least one face at boot
 // Serial2 face store (j4_display_right microSD)
 bool          facesSD_synced   = false;  // a complete dump has landed
 uint8_t       facesSD_count    = 0;      // FACE: lines since the last FACES?
+bool          facesSD_inDump[FACE_SLOTS];  // slot seen in the current dump
+bool          facesSD_noCard   = false;  // last answer was FACE_END:-1
 unsigned long facesSDReq_previousMillis = 0;
-const unsigned long facesSDReq_interval = 2500;  // re-ask until a dump lands
+const unsigned long facesSDReq_interval       = 2500;   // re-ask until a dump lands
+// With no card in the slot, every FACES? makes j4_display_right try to mount
+// it, which stalls that board for a few hundred ms. Ask far less often then;
+// a card inserted later is still picked up within this long.
+const unsigned long facesSDReq_noCardInterval = 10000;
+
+// Last face saved from the keypad, so the card's FACEOK:/FACEERR: answer to
+// THAT save can be reported on screen while background re-syncs stay quiet.
+char          faceSaved_key = 0;
+unsigned long faceSaved_at  = 0;
+#define FACE_ACK_REPORT_MS  10000
 
 bool          faces_synced   = false;  // true once a complete SD dump landed
 uint8_t       faceDumpCount  = 0;      // FACE_OP_DATA packets since last REQ
@@ -975,15 +1023,20 @@ int16_t phys_baseline[FACE_VALUES];
 bool    phys_baseline_init = false;
 uint8_t toggles_phys_last  = 0;
 
-// Right keypad (face keypad) press/hold tracking + save-confirm prompt
-#define FACE_HOLD_MS            3000   // hold this long to open the save prompt
-#define FACE_PROMPT_TIMEOUT_MS 10000   // unanswered prompt cancels itself
+// Right keypad (face keypad) press/hold tracking. Tap = recall, hold = save.
+//
+// A release only counts once no key has been seen for RK_RELEASE_MS. A single
+// scan that misses a held key (a membrane contact flickering under a thumb, or
+// a NACKed I2C read) used to count as a release: before 3s that restarted the
+// hold timer, so a save could not be reached, and it fired a recall as well.
+#define FACE_HOLD_MS   3000   // hold this long to save the face to that key
+#define RK_SCAN_MS       50   // right pad scan period
+#define RK_RELEASE_MS   200   // no key seen this long = released
 int8_t        rk_down       = -1;     // scan code currently held, -1 = none
 unsigned long rk_down_since = 0;
-bool          rk_hold_fired = false;  // this press already opened the prompt
-bool          rk_consumed   = false;  // this press answered the prompt
-char          face_prompt_key     = 0;   // 0 = no prompt showing
-unsigned long face_prompt_started = 0;
+unsigned long rk_last_seen  = 0;      // last scan that actually saw rk_down
+bool          rk_hold_fired = false;  // this press already saved
+unsigned long rk_scan_previousMillis = 0;
 unsigned long faceMsg_clearAt     = 0;   // 0 = message is not timed
 
 // Incoming face packets: OnDataRecv (WiFi task) only memcpys into this ring;
@@ -1364,6 +1417,12 @@ int dualPick(DualPot &d, int a, bool aOk, int b, bool bOk) {
 // it on every use costs nothing, and hot-plugged modules start working
 // within a second.
 #define I2C_REPROBE_MS 1000
+// A device that was present is only declared absent after this many probes
+// in a row fail. One NACK on a long panel harness is noise, not an unplug,
+// and declaring it absent at once cost a full I2C_REPROBE_MS of zeroed pots
+// (servos jumping) or a "released" keypad key. While a device is in that
+// grace window the caller skips it for that pass and keeps its last values.
+#define I2C_MISS_LIMIT 3
 
 bool i2cPresent(uint8_t addr) {
   Wire.beginTransmission(addr);
@@ -1373,11 +1432,13 @@ bool i2cPresent(uint8_t addr) {
 struct AdsGuard {
   ADS1115 &ads;
   uint8_t addr;
-  bool configured;
+  bool configured;       // present and set up; stays true through a short miss run
   unsigned long lastProbe;
   bool probedOnce;
+  uint8_t misses;        // consecutive failed probes while configured
   AdsGuard(ADS1115 &a, uint8_t adr)
-    : ads(a), addr(adr), configured(false), lastProbe(0), probedOnce(false) {}
+    : ads(a), addr(adr), configured(false), lastProbe(0), probedOnce(false),
+      misses(0) {}
 };
 
 AdsGuard adsg_01(ADS_01, 0x48);
@@ -1446,9 +1507,14 @@ bool adsReady(AdsGuard &g) {
     g.lastProbe  = now;
   }
   if (!i2cPresent(g.addr)) {
+    // Not readable this pass. A configured module keeps that status (and the
+    // caller keeps its last values) until I2C_MISS_LIMIT probes in a row fail.
+    if (g.configured && ++g.misses < I2C_MISS_LIMIT) return false;
     g.configured = false;
+    g.misses     = 0;
     return false;
   }
+  g.misses = 0;
   if (!g.configured) {
     g.ads.begin();
     g.ads.setGain(0);      //  0 is ±6.144V    1 is ±4.096V    2 is ±2.048V
@@ -1470,9 +1536,10 @@ struct KeypadGuard {
   bool              present;
   unsigned long     lastProbe;
   bool              probedOnce;
+  uint8_t           misses;   // consecutive failed probes while present
   KeypadGuard(PCF8574 &p, uint8_t a, const char *km, const KeypadPins &kp)
     : pcf(p), addr(a), keymap(km), pins(kp),
-      present(false), lastProbe(0), probedOnce(false) {}
+      present(false), lastProbe(0), probedOnce(false), misses(0) {}
 };
 
 KeypadGuard kpg_left (pcf_left,  0x21, keymap_left,  KP_PINS_LEFT);
@@ -1485,8 +1552,17 @@ bool keypadReady(KeypadGuard &g) {
     g.probedOnce = true;
     g.lastProbe  = now;
   }
-  g.present = i2cPresent(g.addr);
-  return g.present;
+  if (i2cPresent(g.addr)) {
+    g.present = true;
+    g.misses  = 0;
+    return true;
+  }
+  // Same grace as adsReady(): a present pad survives a short run of misses,
+  // so one NACK reads as "no information this scan", not "key released".
+  if (g.present && ++g.misses < I2C_MISS_LIMIT) return false;
+  g.present = false;
+  g.misses  = 0;
+  return false;
 }
 
 
@@ -1509,6 +1585,7 @@ bool dispRLinkUp() {
 // face then FACE_END:<n>, and the count is what makes a dump complete.
 void faceRequestDump() {
   facesSD_count = 0;
+  for (uint8_t i = 0; i < FACE_SLOTS; i++) facesSD_inDump[i] = false;
   Serial2.print("FACES?\n");
 }
 
@@ -1570,38 +1647,27 @@ FaceSlot *faceAlloc(char kc) {
   if (f) return f;
   for (uint8_t i = 0; i < FACE_SLOTS; i++)
     if (faces[i].key == 0) return &faces[i];
-  return NULL;   // cannot happen: 15 possible keys, 16 slots
+  return NULL;   // cannot happen: 16 possible keys, 16 slots
 }
 
-// Message on j4_display_right (Serial2 TX). showMs = 0 leaves it up until
-// replaced or cleared; otherwise loop() sends "X:" after showMs. Fire and
-// forget: if the display is unplugged the bytes just fall on the floor, and
-// the display self-clears a stale message after 15s anyway.
+// Message on j4_display_right (Serial2 TX), shown in that screen's header
+// strip. showMs = 0 leaves it up until replaced or cleared; otherwise loop()
+// sends "X:" after showMs. Fire and forget: if the display is unplugged the
+// bytes just fall on the floor, and the display self-clears a stale message
+// after 15s anyway.
 void faceMsg(const char *l1, const char *l2, unsigned long showMs) {
   Serial2.printf("M:%s|%s\n", l1, l2);
   faceMsg_clearAt = showMs ? millis() + showMs : 0;
 }
 
-void facePromptOpen(char kc) {
-  face_prompt_key     = kc;
-  face_prompt_started = millis();
+// Snapshot the CURRENT face into key kc: the effective values (post
+// arbitration and preset overlay), i.e. exactly what the robot's face looks
+// like right now. Called when a key on keypad_right has been held for 3s.
+void faceSave(char kc) {
   char l1[24];
-  snprintf(l1, sizeof(l1), "SAVE FACE ON %c?", kc);
-  faceMsg(l1, "PRESS * TO CONFIRM", 0);
-}
-
-void facePromptCancel(const char *why) {
-  face_prompt_key = 0;
-  faceMsg("SAVE CANCELLED", why, 2500);
-}
-
-// Snapshot the CURRENT face -- the effective values (post arbitration and
-// preset overlay), i.e. exactly what the robot's face looks like right now.
-void faceSaveConfirmed() {
-  char kc = face_prompt_key;
-  face_prompt_key = 0;
+  snprintf(l1, sizeof(l1), "FACE SAVED TO %c", kc);
   FaceSlot *f = faceAlloc(kc);
-  if (!f) { faceMsg("SAVE FAILED", "NO FREE SLOTS", 2500); return; }
+  if (!f) { faceMsg("SAVE FAILED", "NO FREE SLOTS", 3000); return; }
   f->key       = kc;
   f->valid     = true;
   f->dirty     = true;
@@ -1625,9 +1691,11 @@ void faceSaveConfirmed() {
   facesSaveNVS();
   faces_from_nvs = true;
   faceSendToSD(f);
-  char l1[24];
-  snprintf(l1, sizeof(l1), "FACE SAVED ON %c", kc);
-  faceMsg(l1, dispRLinkUp() ? "WRITING TO SD..." : "CACHED: NO SD LINK", 2500);
+  faceSaved_key = kc;
+  faceSaved_at  = millis();
+  // The face is already safe in NVS. The second line is only about the card,
+  // and FACEOK:/FACEERR: replaces it with the outcome.
+  faceMsg(l1, dispRLinkUp() ? "WRITING SD CARD..." : "IN CONTROLLER, SD LATER", 3000);
 }
 
 // One line back from j4_display_right's face store. Only the four recognised
@@ -1649,6 +1717,7 @@ void faceHandleSDLine(const String &line) {
     if (n != FACE_VALUES + 2) return;          // malformed, ignore
     facesSD_count++;
     FaceSlot *f = faceAlloc(key);
+    if (f) facesSD_inDump[f - faces] = true;
     if (f && !f->dirty) {
       f->key       = key;
       f->valid     = true;
@@ -1664,28 +1733,50 @@ void faceHandleSDLine(const String &line) {
     // n < 0 means there is no card to read, as opposed to a mounted card with
     // no faces on it yet (n == 0). Staying unsynced keeps the request timer
     // asking, so inserting a card later loads it without a reboot.
+    facesSD_noCard = (n < 0);
     if (n < 0) { facesSD_synced = false; return; }
     // Complete only if every announced face actually landed; otherwise stay
     // unsynced and the request timer asks again (idempotent).
     facesSD_synced = (facesSD_count == (uint8_t)n);
-    if (facesSD_synced && n > 0) {
-      // Mirror the card into NVS so the next boot works without the display.
-      facesSaveNVS();
-      faces_from_nvs = true;
+    if (!facesSD_synced) return;
+    // The card is answering, so give up any earlier write failure, and queue
+    // every face held here that the card does not have. That is what fills a
+    // freshly formatted card from the faces already saved in this controller,
+    // instead of leaving them stranded in NVS.
+    for (uint8_t i = 0; i < FACE_SLOTS; i++) {
+      faces[i].sd_failed = false;
+      if (faces[i].valid && !facesSD_inDump[i]) faces[i].dirty = true;
     }
+    // Mirror the card into NVS so the next boot works without the display.
+    facesSaveNVS();
+    for (uint8_t i = 0; i < FACE_SLOTS; i++)
+      if (faces[i].valid) faces_from_nvs = true;
 
   } else if (line.startsWith("FACEOK:")) {
     char kc = line.length() > 7 ? line[7] : 0;
     FaceSlot *f = faceFind(kc);
     if (f) { f->dirty = false; facesSaveNVS(); }   // do not re-push after reboot
-    snprintf(l1, sizeof(l1), "FACE %c ON SD", kc);
-    faceMsg(l1, "", 1500);
+    // Only report the card result for the save the user just made; the
+    // background sync of older faces stays silent.
+    if (kc && kc == faceSaved_key && millis() - faceSaved_at < FACE_ACK_REPORT_MS) {
+      snprintf(l1, sizeof(l1), "FACE SAVED TO %c", kc);
+      faceMsg(l1, "SD CARD OK", 3000);
+      faceSaved_key = 0;
+    }
 
   } else if (line.startsWith("FACEERR:")) {
     char kc = line.length() > 8 ? line[8] : 0;
     FaceSlot *f = faceFind(kc);
     if (f) f->sd_failed = true;   // stays valid in NVS, stop auto-retrying
-    faceMsg("SD WRITE FAILED", "FACE HELD IN CONTROLLER", 3000);
+    // Re-ask for a dump: a missing or pulled card answers FACE_END:-1 and the
+    // slower no-card cadence takes over; a card that comes back answers with
+    // a complete dump, which clears sd_failed and re-queues this face.
+    facesSD_synced = false;
+    if (kc && kc == faceSaved_key && millis() - faceSaved_at < FACE_ACK_REPORT_MS) {
+      snprintf(l1, sizeof(l1), "FACE SAVED TO %c", kc);
+      faceMsg(l1, "SD WRITE FAILED, KEPT IN CONTROLLER", 4000);
+      faceSaved_key = 0;
+    }
   }
 }
 
@@ -1694,7 +1785,7 @@ void faceRecall(char kc) {
   FaceSlot *f = faceFind(kc);
   if (!f || !f->valid) {
     snprintf(l1, sizeof(l1), "NO FACE ON %c", kc);
-    faceMsg(l1, "HOLD 3s TO SAVE ONE", 2500);
+    faceMsg(l1, "HOLD 3 SEC TO SAVE ONE", 2500);
     return;
   }
   for (uint8_t i = 0; i < FACE_VALUES; i++) {
@@ -1707,7 +1798,7 @@ void faceRecall(char kc) {
   // phys_baseline stops updating while preset_on, so takeover measures total
   // travel since this exact moment.
   snprintf(l1, sizeof(l1), "FACE %c RECALLED", kc);
-  faceMsg(l1, "MOVE A POT TO RETAKE IT", 2000);
+  faceMsg(l1, "MOVE A POT TO RETAKE IT", 2500);
 }
 
 void faceSendPkt(uint8_t op, const FaceSlot *f) {
@@ -1821,6 +1912,11 @@ void setup() {
 
   // XIAO display links - init after ADS1115 to avoid I2C/UART peripheral conflict
   Serial1.begin(XIAO_BAUD, SERIAL_8N1, XIAO_RX_PIN,  XIAO_TX_PIN);    // j4_display_left
+  // A full FACES.TXT dump from j4_display_right is ~900 bytes in one burst, and
+  // one 40ms control pass (16 single-shot ADC reads) lets up to ~460 bytes
+  // pile up. The 256-byte default can overflow, the dump comes back short, and
+  // the controller re-asks for it forever. Must be set before begin().
+  Serial2.setRxBufferSize(2048);
   Serial2.begin(XIAO_BAUD, SERIAL_8N1, XIAOR_RX_PIN, XIAOR_TX_PIN);   // j4_display_right
 
   WiFi.mode(WIFI_STA);
@@ -1957,7 +2053,8 @@ void loop() {
     // Eyes are centre-zero (-128..0..128) with a hard zero at neutral.
     eyes_x_value = eyeAxis(ads_raw[0][2], EYE_X_AT_MINUS, EYE_X_AT_ZERO, EYE_X_AT_PLUS, eyex_sticky);
     eyes_y_value = eyeAxis(ads_raw[0][3], EYE_Y_AT_MINUS, EYE_Y_AT_ZERO, EYE_Y_AT_PLUS, eyey_sticky);
-  } else {
+  } else if (!adsg_01.configured) {
+    // Declared absent (not just one missed probe, which keeps last values).
     eyes_x_value = eyes_y_value = 0;      // centre-zero: 0 = eyes centred
     eyex_sticky  = eyey_sticky  = 0;
     neck_value   = jaw_value    = 1600;   // joystick centre, not hard-over
@@ -1973,7 +2070,7 @@ void loop() {
     eyebrow_r_value     = processPot(ads_raw[1][1], 255);  // Eyebrow R
     basket_brow_l_value = processPot(ads_raw[1][2], 255);  // Basket Eyebrow L
     basket_brow_r_value = processPot(ads_raw[1][3], 255);  // Basket Eyebrow R
-  } else {
+  } else if (!adsg_02.configured) {
     eyebrow_l_value = eyebrow_r_value = basket_brow_l_value = basket_brow_r_value = 0;
     ads_raw[1][0] = ads_raw[1][1] = ads_raw[1][2] = ads_raw[1][3] = -1;
   }
@@ -1985,10 +2082,12 @@ void loop() {
     nose_value          = processPot(ads_raw[2][0], 255);  // Nose (up/down)
     eyelid_l_value      = processPot(ads_raw[2][2], 255);  // Bottom Eyelid L
     eyelid_r_value      = processPot(ads_raw[2][3], 255);  // Bottom Eyelid R
-  } else {
+  } else if (!adsg_03.configured) {
     nose_value = eyelid_l_value = eyelid_r_value = 0;
     ads_raw[2][0] = ads_raw[2][1] = ads_raw[2][2] = ads_raw[2][3] = -1;
   }
+  // ads4_ok gates the reads; adsg_04.configured (true through a short run of
+  // missed probes, with the last values held) is what counts as "present".
   bool ads4_ok = adsReady(adsg_04);
   if (ads4_ok) {
     // A0 is the old NECK PIV pot: DISABLED as a control, but still read so the
@@ -2009,7 +2108,7 @@ void loop() {
                                   FADER_R_RAW_BOTTOM, FADER_R_RAW_TOP,
                                   0, FADER_R_OUT);        // fader_right -> iris
     nose_basket_value = processPot(ads_raw[3][3], 255);   // Nose Basket
-  } else {
+  } else if (!adsg_04.configured) {
     fader_left_value  = 0;   // centre-zero scale: 0 = stop
     fl_sticky         = 0;   // reset the filter with it
     fader_right_value = nose_basket_value = 0;
@@ -2039,7 +2138,7 @@ void loop() {
   // pot is disabled and fader_left is its only source -- and Nose Basket is
   // single-source too, so iris is the only pair left.
   iris_value        = dualPick(dual_iris, iris_value, dispR_ok,
-                               fader_right_value, ads4_ok);
+                               fader_right_value, adsg_04.configured);
   // --- END ADC READS ---
 
   // Panel toggles: INPUT_PULLUP, switch closes to GND, so ON = LOW
@@ -2151,13 +2250,35 @@ void loop() {
   xmitData.display_l_ok_xmit  = (millis() - lastDisplayMs  < DISPLAY_TIMEOUT_MS) ? 1 : 0;
   xmitData.display_r_ok_xmit  = (millis() - lastDisplayRMs < DISPLAY_TIMEOUT_MS) ? 1 : 0;
 
-  // Arbitrated iris to j4_display_right, so its IRIS bar follows whichever of
-  // the pair moved last. The IRIS pot is on that board, fader_right is on this
-  // one, and dualPick() above is the only place the winner is known. This is
-  // post-overlay, so a recalled face shows on the bar as well. Fire and forget
-  // from loop context, like faceMsg(): if the display is unplugged the bytes
-  // fall on the floor and it reverts to drawing its own pot.
-  Serial2.printf("I:%d\n", constrain(iris_value, 0, 255));
+  // The whole effective face to j4_display_right, in FI_* order (the same
+  // order FACES.TXT uses): iris, color, brightness, then the 8 face pots.
+  // Its top area shows the 8 face pots, which are read on THIS board, and its
+  // IRIS/COLOR/BRIGHTNESS bars follow these values rather than its own pots,
+  // because the winner of the iris pair (dualPick() above) and any recalled
+  // face (the overlay above) only exist here. -1 = that channel's source is
+  // absent and no preset is holding it, so the display shows "--" instead of
+  // a 0 that looks real. Fire and forget from loop context, like faceMsg().
+  {
+    bool ads2 = adsg_02.configured, ads3 = adsg_03.configured,
+         ads4 = adsg_04.configured;
+    const bool src_ok[FACE_VALUES] = {
+      dispR_ok || ads4, dispR_ok, dispR_ok,    // iris (either source), color, bright
+      ads2, ads2, ads2, ads2,                  // brow L/R, basket brow L/R
+      ads3, ads4, ads3, ads3                   // nose, nose basket, eyelid L/R
+    };
+    const int fv[FACE_VALUES] = {
+      iris_value, color_value, brightness_value,
+      eyebrow_l_value, eyebrow_r_value, basket_brow_l_value, basket_brow_r_value,
+      nose_value, nose_basket_value, eyelid_l_value, eyelid_r_value
+    };
+    char vline[64];
+    int  n = snprintf(vline, sizeof(vline), "V:");
+    for (uint8_t i = 0; i < FACE_VALUES; i++)
+      n += snprintf(vline + n, sizeof(vline) - n, i ? ",%d" : "%d",
+                    (src_ok[i] || preset_on[i]) ? constrain(fv[i], 0, 255) : -1);
+    snprintf(vline + n, sizeof(vline) - n, "\n");
+    Serial2.print(vline);
+  }
 
   esp_now_send(broadcastAddress, (uint8_t *)&xmitData, sizeof(xmitData));
 
@@ -2265,47 +2386,49 @@ void loop() {
       }  // end key <= 15 guard
     }
 
-    // RIGHT keypad -- FACE PRESETS. Tap = recall that key's face. Hold >= 3s
-    // (any key but '*') = save prompt on j4_display_right; while the prompt
-    // is up, '*' confirms and any other key cancels. Pure state tracking at
-    // the same 150ms scan cadence -- nothing here blocks.
-    bool rk_pressed = keypadReady(kpg_right) && kpIsPressed(kpg_right.pcf, kpg_right.pins);
-    uint8_t rk_raw  = 16;
-    if (rk_pressed) {
-      rk_raw = kpGetKey(kpg_right.pcf, kpg_right.pins);
-      if (rk_raw > 15) rk_pressed = false;   // ghost read -- treat as none
-    }
-    if (rk_pressed) {
-      char kc = kpg_right.keymap[rk_raw];
-      if ((int8_t)rk_raw != rk_down) {       // new key down
-        rk_down       = (int8_t)rk_raw;
-        rk_down_since = currentMillis;
-        rk_hold_fired = false;
-        rk_consumed   = false;
-        last_key_char_right = kc;
-        if (face_prompt_key) {               // this press answers the prompt
-          rk_consumed = true;
-          if (kc == '*') faceSaveConfirmed();
-          else           facePromptCancel("CANCELLED");
+  }
+
+  // RIGHT keypad -- FACE PRESETS. Tap = recall that key's face. Hold for 3s =
+  // save the current face to that key, straight away, and j4_display_right
+  // shows "FACE SAVED TO <key>". Every key is a slot. Scanned on its own
+  // faster timer so a tap feels immediate even with the release debounce.
+  // Pure state tracking, nothing here blocks.
+  if (currentMillis - rk_scan_previousMillis >= RK_SCAN_MS) {
+    rk_scan_previousMillis = currentMillis;
+
+    if (!keypadReady(kpg_right)) {
+      // A pad that is really gone forgets its key without recalling anything.
+      // A pad inside its missed-probe grace window just gives no information
+      // this scan: the held key stays held.
+      if (!kpg_right.present) rk_down = -1;
+    } else {
+      uint8_t rk_raw = 16;   // NoKey
+      if (kpIsPressed(kpg_right.pcf, kpg_right.pins))
+        rk_raw = kpGetKey(kpg_right.pcf, kpg_right.pins);
+
+      if (rk_raw <= 15) {
+        char kc = kpg_right.keymap[rk_raw];
+        rk_last_seen = currentMillis;
+        if ((int8_t)rk_raw != rk_down) {       // new key down
+          rk_down       = (int8_t)rk_raw;
+          rk_down_since = currentMillis;
+          rk_hold_fired = false;
+          last_key_char_right = kc;
+        } else if (!rk_hold_fired && currentMillis - rk_down_since >= FACE_HOLD_MS) {
+          rk_hold_fired = true;                // once per press
+          faceSave(kc);
         }
-      } else if (!rk_hold_fired && !rk_consumed && !face_prompt_key
-                 && currentMillis - rk_down_since >= FACE_HOLD_MS) {
-        rk_hold_fired = true;
-        if (kc != '*') facePromptOpen(kc);   // '*' is confirm-only, never a slot
+      } else if (rk_down >= 0 && currentMillis - rk_last_seen >= RK_RELEASE_MS) {
+        // Released: no key seen for RK_RELEASE_MS. A press that already saved
+        // does nothing more; a shorter one is a tap and recalls.
+        if (!rk_hold_fired) faceRecall(kpg_right.keymap[rk_down]);
+        rk_down = -1;
       }
-    } else if (rk_down >= 0) {               // key released
-      if (!rk_hold_fired && !rk_consumed && !face_prompt_key
-          && kpg_right.keymap[rk_down] != '*')
-        faceRecall(kpg_right.keymap[rk_down]);
-      rk_down = -1;
     }
   }
 
   // --- FACE PRESET BACKGROUND WORK (all timer-driven, never blocking) ---
   processFacePackets();
-
-  if (face_prompt_key && currentMillis - face_prompt_started >= FACE_PROMPT_TIMEOUT_MS)
-    facePromptCancel("TIMED OUT");
 
   if (faceMsg_clearAt && currentMillis >= faceMsg_clearAt) {
     faceMsg_clearAt = 0;
@@ -2315,7 +2438,8 @@ void loop() {
   // Re-request the dump from the authoritative store (j4_display_right's
   // microSD) until a complete one lands. Fires only while that link is up; a
   // bench board with no display simply runs from its NVS cache.
-  if (currentMillis - facesSDReq_previousMillis >= facesSDReq_interval) {
+  if (currentMillis - facesSDReq_previousMillis
+      >= (facesSD_noCard ? facesSDReq_noCardInterval : facesSDReq_interval)) {
     facesSDReq_previousMillis = currentMillis;
     if (!facesSD_synced && dispRLinkUp()) faceRequestDump();
   }

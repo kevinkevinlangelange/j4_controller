@@ -13,7 +13,7 @@ Johnny 4 is a prop robot controlled wirelessly. This board is the handheld contr
 - Ingests four more pots (iris, color, brightness, volume) from [j4_display_right](https://github.com/kevinkevinlangelange/j4_display_right)'s dedicated ADS1115 over Serial2 as 25 Hz `P:` lines
 - Reads two 4x4 matrix keypads via PCF8574 I2C expanders using a custom scan routine
 - Left keypad: jukebox-style audio phrase selection: press a letter (A-D) then a digit (0-9) to queue a phrase, or press a digit alone to queue a 0x phrase (e.g. pressing 8 queues "08.wav")
-- Right keypad: face presets. Tap a key to recall its saved face; hold a key 3 seconds to save the current face to it (j4_display_right shows a confirm prompt, * confirms). Faces live on the microSD on j4_display_right's TFT module, with a cache in this board's NVS flash so saves are immediate and recall works with that board unplugged
+- Right keypad: face presets. Tap a key to recall its saved face; hold a key 3 seconds to save the current face to it (j4_display_right shows "FACE SAVED TO `<key>`"). Faces live on the microSD on j4_display_right's TFT module, with a cache in this board's NVS flash so saves are immediate and recall works with that board unplugged
 - Press `*` to send a STOP command, press `#` to clear the buffer
 - Mixes the joystick into differential neck-left / neck-right values, both centre-zero (**-1600..0..1600**). Both axes are sticky-filtered at the source so a parked (spring-removed) stick holds dead still without giving up 1-count precision when moved slowly
 - Transmits all control data to the robot receiver via ESP-NOW (fixed-size packed structs, no `String` members so they survive the wireless `memcpy`)
@@ -43,7 +43,7 @@ Johnny 4 is a prop robot controlled wirelessly. This board is the handheld contr
 | 22 | I2C SCL |
 | 17 | Serial1 TX to j4_display_left (XIAO D7) |
 | 27 | Serial1 RX from j4_display_left (XIAO D6) |
-| 25 | Serial2 TX to j4_display_right (XIAO D7, face-preset messages) |
+| 25 | Serial2 TX to j4_display_right (XIAO D7: face values, messages, face store) |
 | 26 | Serial2 RX from j4_display_right (XIAO D6, pot feed) |
 | 32 | LASER toggle (INPUT_PULLUP, switch closes to GND) |
 | 33 | VENT toggle (INPUT_PULLUP, switch closes to GND) |
@@ -67,7 +67,7 @@ top-to-bottom as shown.
                    ground -- GND|             |  GND  ground
                    ground -- GND|     TTGO    |  27   DISP-L RX <- XIAO D6
       (avoid: boot/flash) -- 12 |  T-Display  |  26   DISP-R RX <- XIAO D6
-           EYE POP toggle -- 13 |     v1.1    |  25   DISP-R TX (face msgs)
+           EYE POP toggle -- 13 |     v1.1    |  25   DISP-R TX (values+msgs)
                AUX toggle -- 15 |             |  33   VENT toggle
                    (free) -- 2  |   [ ST7789  |  32   LASER toggle
      DISP-L TX -> XIAO D7 -- 17 |    TFT on   |  39   (input only)
@@ -256,6 +256,10 @@ Only the iris is arbitrated now: the IRIS pot on j4_display_right against fader_
 
 The neck pivot no longer has a pair -- the NECK PIV pot is disabled and fader_left is its only source -- and Nose Basket is single-source as well.
 
+### Values shown on j4_display_right
+
+Every 40ms this board sends j4_display_right the whole effective face as `V:<iris>,<color>,<brightness>,<brow L>,<brow R>,<basket brow L>,<basket brow R>,<nose>,<nose basket>,<eyelid L>,<eyelid R>` (0-255 each, the `FACES.TXT` order). These are the values after arbitration and after any recalled face, so the screen shows what the servos are actually being sent. A channel whose module is absent, with no recalled face holding it, goes out as `-1` and shows as `--`. This replaced the iris-only `I:` line in v0_6_41.
+
 Remote, streamed from j4_display_right's dedicated ADS1115 (raw counts over Serial2, scaled here with the same `processPot()`):
 
 | Channel | Control | Destination |
@@ -285,7 +289,7 @@ Two 4x4 keypads, each on its own PCF8574 backpack on the shared I2C bus:
 - **keypad_left** (the newer keypad, left of the panel) at **0x21** -- set the backpack's A0 jumper high. If that backpack turns out to be a PCF8574**A**, the same jumper lands at 0x39; change the two `0x21`s in `main.cpp`.
 - **keypad_right** (the original keypad) at **0x20** -- all jumpers low.
 
-The left keypad drives phrase select; the right keypad drives face presets (tap = recall, 3s hold = save prompt, * confirms). Each can be absent or hot-plugged without affecting the other.
+The left keypad drives phrase select; the right keypad drives face presets (tap = recall, 3s hold = save). Each can be absent or hot-plugged without affecting the other.
 
 Each keypad is plugged straight into its PCF8574 P0-P7 (keypad pin 1 into P0, in order). The I2CKeyPad library's fixed scan pattern does not match this wiring, so the firmware uses a custom scan via the PCF8574 library directly.
 
@@ -330,7 +334,9 @@ A **face** is a snapshot of the robot's facial expression: iris, eye color, eye 
 On the **right keypad**:
 
 - **Tap a key**: recall that key's saved face. Every face channel jumps to the saved value and holds there; turning any face pot takes just that channel back (frozen-baseline takeover, so even a slow turn works), and flipping a toggle takes that toggle back. The rest of the face stays put.
-- **Hold a key for 3 seconds** (any key except `*`): j4_display_right shows "SAVE FACE ON `<key>`? PRESS * TO CONFIRM". `*` saves, any other key cancels, and an unanswered prompt times out after 10 seconds.
+- **Hold a key for 3 seconds** (any key, `*` and `#` included): the current face is saved to that key at once, and j4_display_right's header strip shows "FACE SAVED TO `<key>`" with the SD card result underneath ("SD CARD OK", or "SD WRITE FAILED, KEPT IN CONTROLLER"). Keep holding as long as you like; it saves once per press.
+
+The right pad is scanned every 50ms, and a key only counts as released after 200ms with nothing seen. Before v0_6_41 a single scan that missed the held key (a membrane contact flicker, or one NACKed I2C read, which also took the pad offline for a full second) counted as a release: the 3s hold restarted, a recall fired, and once the old confirm prompt was up the same key read as a "new" press that cancelled it. Both keypads and all four ADS1115s now also ride out up to two missed I2C probes (`I2C_MISS_LIMIT`) before being declared absent, holding their last values meanwhile.
 
 ### Where faces are stored
 
@@ -338,7 +344,7 @@ The authoritative store is the **microSD on j4_display_right's TFT module**, in 
 
 The split matters:
 
-- **The card is the source of truth.** This board asks for a dump at boot and writes through on every save, over the Serial2 link that already carries `M:`/`X:`/`I:`. A dump overwrites the local cache, the one exception being a locally-dirty slot, which is newer than the card by definition and is queued to be pushed to it.
+- **The card is the source of truth.** This board asks for a dump at boot and writes through on every save, over the Serial2 link that already carries `V:`/`M:`/`X:`. A dump overwrites the local cache, the one exception being a locally-dirty slot, which is newer than the card by definition and is queued to be pushed to it.
 - **The NVS cache means nothing waits on the card.** A save is in flash before the confirmation is drawn, boot never blocks on a dump, and recall works with j4_display_right unplugged, which is most of bench testing.
 
 Writes happen only on a save, on a mirror acknowledgement, and once on migration, so flash wear is a non-issue even before NVS's own wear levelling. The stored blob carries a version byte plus `FACE_SLOTS` and `FACE_VALUES`, so changing either is detected on load and treated as "nothing stored" rather than reinterpreted as garbage.
@@ -347,16 +353,17 @@ Normal firmware uploads leave NVS alone. `pio run -t erase` and changes to the p
 
 ### Sync behaviour
 
-- This board re-requests the dump every 2.5s until a complete one lands. A dump only counts as complete when the `FACE:` lines received match the count in `FACE_END:<n>`, so a partial read is simply re-requested.
+- This board re-requests the dump every 2.5s until a complete one lands (every 10s while the answer is "no card", since each request makes j4_display_right try to mount the slot). A dump only counts as complete when the `FACE:` lines received match the count in `FACE_END:<n>`, so a partial read is simply re-requested.
 - `FACE_END:-1` means there is no card, as distinct from `FACE_END:0` for a mounted card with no faces yet. On `-1` this board stays unsynced and keeps asking, so a card inserted later loads without a reboot.
-- A save is cached in NVS first, then written through. While j4_display_right is offline the save stays flagged dirty and one dirty face is pushed per 2s tick once the link returns. The display shows "FACE `<key>` ON SD" on `FACEOK:`.
-- On `FACEERR:` nothing is lost: the face is in NVS regardless, and auto-retry stops for that slot until it is re-saved. A reboot clears the failure flag so the write is retried.
+- A save is cached in NVS first, then written through. While j4_display_right is offline the save stays flagged dirty and one dirty face is pushed per 2s tick once the link returns. Only the answer to the save just made is shown; background syncs stay quiet.
+- After a complete dump, every face held here that the card lacks is queued and written to it, so a freshly formatted card fills itself from the faces already in this controller.
+- On `FACEERR:` nothing is lost: the face is in NVS regardless. Auto-retry stops for that slot and the dump is re-requested; the next complete dump (the card is back) clears the failure and re-queues it.
 
 ### The old j4_talk path
 
 The `FACES.TXT` path on j4_talk's microSD is gated off behind `FACE_STORE_TALK_SD`, which defaults to `0`. Two stores both serving dumps would fight, with whichever answered last silently winning, so while the display_right card is in use the controller neither requests from talk nor acts on face packets it sends. The ESP-NOW plumbing is left in place, so setting that define back to `1` restores the old behaviour without touching j4_receiver or j4_talk.
 
-Slots are keyed by the keypad **character**, so re-deriving a keymap keeps every saved face on the same printed key. 15 keys are usable as slots (`*` is the confirm key). Face traffic is its own ESP-NOW packet type (0x04) translated by j4_receiver to text lines on the Teensy UART; see those repos for the protocol.
+Slots are keyed by the keypad **character**, so re-deriving a keymap keeps every saved face on the same printed key. All 16 keys are usable as slots. Face traffic is its own ESP-NOW packet type (0x04) translated by j4_receiver to text lines on the Teensy UART; see those repos for the protocol.
 
 ## Dependencies
 
